@@ -21,7 +21,10 @@ class dataHandler(object):
 		self.fileList = os.listdir(path)
 		self.dataShapeMultiple = dataShapeMultiple
 		self.window = window
-		self.trainFileList,self.valFileList = train_test_split(self.fileList,test_size=valSplit,random_state=0)
+		if valSplit>0:
+			self.trainFileList,self.valFileList = train_test_split(self.fileList,test_size=valSplit,random_state=0)
+		elif valSplit==0:
+			self.trainFileList = self.fileList
 
 	def getBB(self,vol):
 		'''
@@ -69,7 +72,7 @@ class dataHandler(object):
 			vol = sitk.ReadImage(self.path+caseName+'/resampled_labels.nii.gz')
 			vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
 			vol[vol==2] = 1
-		# vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
+		vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple*2)
 		if sectionSide=='left':
 			vol = vol[:,:,(vol.shape[2]//2):]
 		elif sectionSide=='right':
@@ -114,29 +117,36 @@ class dataHandler(object):
 					# yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
 					count = 0 ; volArr = [] ; labelArr = []
 
-	def loadSegData(self,fileList):
+	def loadSegData(self,fileList,isTest=False):
 		while True:
 			fileList = np.random.permutation(fileList)
 			directions = ['left','right']
 			volArr = []
 			labelArr = []
+			directionList = []
 			count = 0
 			for case in fileList:
-				directions = np.random.permutation(directions)
+				if not isTest:
+					directions = np.random.permutation(directions)
 				for direction in directions:
-					fullVol = self.loadVolume(case,direction,'data')
-					segLabel = self.loadVolume(case,direction,'label')
-					if segLabel.dtype=='uint16':
-						segLabel = segLabel.astype('uint8')
-					vol = self.resizeToNearestMultiple(fullVol,self.dataShapeMultiple)
-					segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
+					vol = self.loadVolume(case,direction,'data')
+					# vol = self.resizeToNearestMultiple(fullVol,self.dataShapeMultiple)
 					vol = torch.Tensor(vol).cuda()
-					label = torch.Tensor(segLabel).long().cuda()
 					volArr.append(vol)
-					labelArr.append(label)
+					if not isTest:
+						segLabel = self.loadVolume(case,direction,'label')
+						if segLabel.dtype=='uint16':
+							segLabel = segLabel.astype('uint8')
+						segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
+						label = torch.Tensor(segLabel).long().cuda()
+						labelArr.append(label)
 					count+=1
+					directionList.append(direction)
 					if count==self.batchSize:
-						yield torch.stack(volArr).unsqueeze(1), torch.stack(labelArr).unsqueeze(1)
+						if isTest:
+							yield torch.stack(volArr).unsqueeze(1), case
+						else:
+							yield torch.stack(volArr).unsqueeze(1), torch.stack(labelArr).unsqueeze(1), case, direction
 						# yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
 						count = 0 ; volArr = [] ; labelArr = []
 
@@ -146,7 +156,10 @@ class dataHandler(object):
 			return self.loadSegData(fList)
 		elif task=='main' and genType=='val':
 			fList = self.valFileList
-			return self.loadSegData(fList)			
+			return self.loadSegData(fList)
+		elif task=='main' and genType=='test':
+			fList = self.trainFileList
+			return self.loadSegData(fList,True)
 		elif task=='proxy' and genType=='train':
 			fList = self.trainFileList
 			return self.loadProxyData(fList)

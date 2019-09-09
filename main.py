@@ -26,7 +26,7 @@ def globalAcc(predList,labelList):
 
 def saveVolume(vol,fileName):
     writer = sitk.ImageFileWriter()
-    writer.SetFileName(fName)
+    writer.SetFileName(fileName)
     if isinstance(vol,torch.Tensor):
         if vol.requires_grad:
             vol = vol.detach()
@@ -35,7 +35,7 @@ def saveVolume(vol,fileName):
         vol = vol.numpy()
         if vol.dtype=='int64':
             vol = vol.astype('uint8')
-    writer.Execute(vol)
+    writer.Execute(sitk.GetImageFromArray(vol[0]))
 
 def predictAndGetLoss(model,X,y,batchSize,taskType):
     '''
@@ -116,23 +116,43 @@ def validate(model,genObj,epoch,batchSize,nBatches,taskType):
     labelList = []
     model.eval()
     for m in range(nBatches):
-        X,y = genObj.__next__()
-        loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+        X,y,case,direction = genObj.__next__()
+        # if case=='case_00022' and direction=='right':
+        #     pdb.set_trace()
+        # loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
         if taskType=='classifyDirect':
             predList.extend(dataForMetric[0])
             labelList.extend(dataForMetric[1])
         elif taskType=='segment':
-            runningDice += dataForMetric
-        runningLoss += loss.item()
+            pass
+            # runningDice += dataForMetric
+        # runningLoss += loss.item()
+        print('Case: '+case+' '+direction+' side ')#+str(dataForMetric.item()))
     if taskType=='classifyDirect':
         acc = globalAcc(predList,labelList)
         print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Acc : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), acc.item() ))
     elif taskType=='classifySiamese':
         print('Epoch num. %d \t Val. Loss : %.7f ; \t ' %(epoch+1,runningLoss/( (m+1)*batchSize) ))
     elif taskType=='segment':
-        dice = runningDice / (m+1)
-        print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))   
+        pass
+        # dice = runningDice / (m+1)
+        # print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))   
 
+def test(model,genObj,epoch,batchSize,nBatches):
+    model.eval()
+    for m in range(nBatches):
+        X, case = genObj.__next__()
+        out = model.cuda(0).forward(X[0].cuda(0).unsqueeze(0))
+        pred1 = torch.argmax(out.cpu(),1)
+        out = model.cuda(1).forward(X[1].cuda(1).unsqueeze(0))
+        pred2 = torch.argmax(out.cpu(),1)
+        fullPred = torch.cat([pred2,pred1],-1)
+        del pred1
+        del pred2
+        del out
+        del X
+        saveVolume(fullPred,'testPreds/prediction_'+case+'.nii.gz')
+        torch.cuda.empty_cache()
 
 class DUN(nn.Module):
     def __init__(self,encoder,decoder):
@@ -150,9 +170,13 @@ def main():
     nSamples = 210
     valSplit = 20
     nTrnBatches = (nSamples - valSplit)//batchSize
-    nValBatches = valSplit 
+    nValBatches = valSplit*2 
 
-    nEpochs = 20
+    testBatchSize = 2
+    nTestSamples = 90
+    nTestBatches = nSamples // batchSize
+
+    nEpochs = 1#20
     lr = 5e-4
     weightDecay = 1e-2
     initEpochNum = int(sys.argv[1])
@@ -162,8 +186,9 @@ def main():
 
     # path = '/scratch/abhinavdhere/pseudoData/'
     path = '/home/abhinav/kits_train/'
+    testPath = '/home/abhinav/kits_test/'
     loadName = 'kidneyOnlySiamese.pt'
-    saveName = 'selfSiamese.pt'
+    saveName = 'selfSiamese.pt' # 'segKidney.pt'
     model = torch.load(saveName)
     # saveName = 'segKidneySelf.pt'
     # proxyModel = torch.load(loadName)
@@ -184,12 +209,14 @@ def main():
     trainDataLoader = dh.giveGenerator('train',problemType)
     valDataLoader = dh.giveGenerator('val',problemType)
 
+    # testDh = dataHandler(testPath,testBatchSize,valSplit=0,dataShapeMultiple=16)
+    # testDataLoader = testDh.giveGenerator('test',problemType)
+
     for epoch in range(initEpochNum, initEpochNum+nEpochs):
-        train(model,trainDataLoader,optimizer,epoch,batchSize,nTrnBatches,taskType)
+        # train(model,trainDataLoader,optimizer,epoch,batchSize,nTrnBatches,taskType)
         validate(model,valDataLoader,epoch,batchSize,nValBatches,taskType)
-
-        torch.save(model,saveName)
-
+        # torch.save(model,saveName)
+    # test(model,testDataLoader,0,batchSize,nTestBatches)
     ## GradCam  
     # vol,label = valDataLoader.__next__()
     # 
