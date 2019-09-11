@@ -15,8 +15,8 @@ from networks import dense_unet_decoder as decoder
 from utils import myBCELoss, toCategorical, dice_coeff, integralDice, compare_models, contrastiveLoss
 
 # from gradCam import GradCam
-from integratedGradientPytorch.integrated_gradients import integrated_gradients
-from integratedGradientPytorch.utils import calculate_outputs_and_gradients
+# from integratedGradientPytorch.integrated_gradients import integrated_gradients
+# from integratedGradientPytorch.utils import calculate_outputs_and_gradients
 
 def globalAcc(predList,labelList):
     predList = torch.cat(predList)
@@ -35,7 +35,7 @@ def saveVolume(vol,fileName):
         vol = vol.numpy()
         if vol.dtype=='int64':
             vol = vol.astype('uint8')
-    writer.Execute(sitk.GetImageFromArray(vol[0]))
+    writer.Execute(sitk.GetImageFromArray(vol.swapaxes(0,2)))
 
 def predictAndGetLoss(model,X,y,batchSize,taskType):
     '''
@@ -47,7 +47,7 @@ def predictAndGetLoss(model,X,y,batchSize,taskType):
         dims = 1
     elif taskType=='segment':
         dims = 3
-    yOH = toCategorical(batchSize,y.cpu(),2,dims).cuda(gpuID)
+    yOH = toCategorical(batchSize,y.cpu(),2,dims).cuda()
     if taskType=='classifyDirect':
         out,_,_,_ = model.forward(X)
         loss = 0
@@ -109,7 +109,7 @@ def train(model,genObj,optimizer,epoch,batchSize,nBatches,taskType):
         dice = runningDice / (m+1)
         print('Epoch num. %d \t Trn. Loss : %.7f ; \t Trn. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))        
 
-def validate(model,genObj,epoch,batchSize,nBatches,taskType):
+def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
     runningLoss = 0.0
     runningDice = 0.0
     predList = []
@@ -118,42 +118,45 @@ def validate(model,genObj,epoch,batchSize,nBatches,taskType):
     for m in range(nBatches):
         X,y,case,direction = genObj.__next__()
         # if case=='case_00022' and direction=='right':
-        #     pdb.set_trace()
-        # loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+        # pdb.set_trace()
+        predictAndSave(X,case,model,dh)
+        loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
         if taskType=='classifyDirect':
             predList.extend(dataForMetric[0])
             labelList.extend(dataForMetric[1])
         elif taskType=='segment':
-            pass
-            # runningDice += dataForMetric
-        # runningLoss += loss.item()
-        print('Case: '+case+' '+direction+' side ')#+str(dataForMetric.item()))
+            runningDice += dataForMetric
+        runningLoss += loss.item()
+        # print('Case: '+case+' '+direction+' side ')#+str(dataForMetric.item()))
     if taskType=='classifyDirect':
         acc = globalAcc(predList,labelList)
         print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Acc : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), acc.item() ))
     elif taskType=='classifySiamese':
         print('Epoch num. %d \t Val. Loss : %.7f ; \t ' %(epoch+1,runningLoss/( (m+1)*batchSize) ))
     elif taskType=='segment':
-        pass
-        # dice = runningDice / (m+1)
-        # print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))   
+        dice = runningDice / (m+1)
+        print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))   
 
-def test(model,genObj,epoch,batchSize,nBatches):
+def predictAndSave(X,case,model,dh):
+    out = model.cuda(0).forward(X[0].cuda(0).unsqueeze(0))
+    pred1 = torch.argmax(out.cpu(),1)
+    out = model.cuda(1).forward(X[1].cuda(1).unsqueeze(0))
+    pred2 = torch.argmax(out.cpu(),1)
+    fullPred = torch.cat([pred2,pred1],-1)
+    fullPredResized = dh.cropResize(fullPred[0],())
+    del pred1
+    del pred2
+    del out
+    del X
+    saveVolume(fullPredResized,'prediction_'+case+'.nii.gz') #testPreds/
+    torch.cuda.empty_cache()
+
+def test(model,genObj,dh):
     model.eval()
     for m in range(nBatches):
         X, case = genObj.__next__()
-        out = model.cuda(0).forward(X[0].cuda(0).unsqueeze(0))
-        pred1 = torch.argmax(out.cpu(),1)
-        out = model.cuda(1).forward(X[1].cuda(1).unsqueeze(0))
-        pred2 = torch.argmax(out.cpu(),1)
-        fullPred = torch.cat([pred2,pred1],-1)
-        del pred1
-        del pred2
-        del out
-        del X
-        saveVolume(fullPred,'testPreds/prediction_'+case+'.nii.gz')
-        torch.cuda.empty_cache()
-
+        predictAndSave(X,model,dh)
+ 
 class DUN(nn.Module):
     def __init__(self,encoder,decoder):
         super(DUN,self).__init__()
@@ -166,7 +169,7 @@ class DUN(nn.Module):
         return out
 
 def main():
-    batchSize = 1
+    batchSize = 2
     nSamples = 210
     valSplit = 20
     nTrnBatches = (nSamples - valSplit)//batchSize
@@ -184,12 +187,12 @@ def main():
     problemType = 'main'
     taskType = 'segment'
 
-    # path = '/scratch/abhinavdhere/pseudoData/'
-    path = '/home/abhinav/kits_train/'
-    testPath = '/home/abhinav/kits_test/'
+    path = '/scratch/abhinavdhere/kits_train/'
+    # path = '/home/abhinav/kits_train/'
+    testPath = '/scratch/abhinavdhere/kits_test/'
     loadName = 'kidneyOnlySiamese.pt'
-    saveName = 'selfSiamese.pt' # 'segKidney.pt'
-    model = torch.load(saveName)
+    saveName =   'selfSiamese.pt' # 'models/segKidney.pt'
+    model = torch.load(saveName).cuda()
     # saveName = 'segKidneySelf.pt'
     # proxyModel = torch.load(loadName)
     # pretrained_dict = proxyModel.state_dict()
@@ -203,20 +206,20 @@ def main():
     # model = DUN(encoderModel,decoderModel)
     # model = encoder().cuda(gpuID)
     # model = nn.DataParallel(model)
-    dh = dataHandler(path,batchSize,valSplit,16)
+    dh = dataHandler(path,batchSize,valSplit,16,gpuID)
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,weight_decay=weightDecay)
 
     trainDataLoader = dh.giveGenerator('train',problemType)
     valDataLoader = dh.giveGenerator('val',problemType)
 
-    # testDh = dataHandler(testPath,testBatchSize,valSplit=0,dataShapeMultiple=16)
-    # testDataLoader = testDh.giveGenerator('test',problemType)
+    testDh = dataHandler(testPath,testBatchSize,valSplit=0,dataShapeMultiple=16,gpuID=gpuID)
+    testDataLoader = testDh.giveGenerator('test',problemType)
 
     for epoch in range(initEpochNum, initEpochNum+nEpochs):
         # train(model,trainDataLoader,optimizer,epoch,batchSize,nTrnBatches,taskType)
-        validate(model,valDataLoader,epoch,batchSize,nValBatches,taskType)
+        validate(model,valDataLoader,epoch,batchSize,nValBatches,taskType,dh)
         # torch.save(model,saveName)
-    # test(model,testDataLoader,0,batchSize,nTestBatches)
+    # test(model,testDataLoader,0,batchSize,nTestBatches,testDh)
     ## GradCam  
     # vol,label = valDataLoader.__next__()
     # 
