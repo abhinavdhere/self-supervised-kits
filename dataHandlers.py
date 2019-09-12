@@ -147,19 +147,19 @@ class dataHandler(object):
             directionList = []
             count = 0
             for case in fileList:
-                # if not isTest:
-                    # directions = np.random.permutation(directions)
+                if not isTest:
+                    directions = np.random.permutation(directions)
                 for direction in directions:
                     vol = self.loadVolume(case,direction,'data')
                     # vol = self.resizeToNearestMultiple(fullVol,self.dataShapeMultiple)
-                    vol = torch.Tensor(vol).cuda()
+                    vol = torch.Tensor(vol).cuda(self.gpuID)
                     volArr.append(vol)
                     if not isTest:
                         segLabel = self.loadVolume(case,direction,'label')
                         if segLabel.dtype=='uint16':
                             segLabel = segLabel.astype('uint8')
                         segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
-                        label = torch.Tensor(segLabel).long().cuda()
+                        label = torch.Tensor(segLabel).long().cuda(self.gpuID)
                         labelArr.append(label)
                     count+=1
                     directionList.append(direction)

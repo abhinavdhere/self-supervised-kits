@@ -47,7 +47,7 @@ def predictAndGetLoss(model,X,y,batchSize,taskType):
         dims = 1
     elif taskType=='segment':
         dims = 3
-    yOH = toCategorical(batchSize,y.cpu(),2,dims).cuda()
+    yOH = toCategorical(batchSize,y.cpu(),2,dims).cuda(gpuID)
     if taskType=='classifyDirect':
         out,_,_,_ = model.forward(X)
         loss = 0
@@ -88,7 +88,7 @@ def train(model,genObj,optimizer,epoch,batchSize,nBatches,taskType):
         for m in range(nBatches):
             X,y = genObj.__next__()
             optimizer.zero_grad()
-            loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+            # loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
             if taskType=='classifyDirect':
                 predList.extend(dataForMetric[0])
                 labelList.extend(dataForMetric[1])
@@ -119,7 +119,7 @@ def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
         X,y,case,direction = genObj.__next__()
         # if case=='case_00022' and direction=='right':
         # pdb.set_trace()
-        predictAndSave(X,case,model,dh)
+        # predictAndSave(X,case,model,dh)
         loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
         if taskType=='classifyDirect':
             predList.extend(dataForMetric[0])
@@ -138,9 +138,9 @@ def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
         print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))   
 
 def predictAndSave(X,case,model,dh):
-    out = model.cuda(0).forward(X[0].cuda(0).unsqueeze(0))
+    out = model.cuda(2).forward(X[0].cuda(2).unsqueeze(0))
     pred1 = torch.argmax(out.cpu(),1)
-    out = model.cuda(1).forward(X[1].cuda(1).unsqueeze(0))
+    out = model.cuda(3).forward(X[1].cuda(3).unsqueeze(0))
     pred2 = torch.argmax(out.cpu(),1)
     fullPred = torch.cat([pred2,pred1],-1)
     fullPredResized = dh.cropResize(fullPred[0],())
@@ -148,14 +148,14 @@ def predictAndSave(X,case,model,dh):
     del pred2
     del out
     del X
-    saveVolume(fullPredResized,'prediction_'+case+'.nii.gz') #testPreds/
+    saveVolume(fullPredResized,'testPreds_scratch/prediction_'+case.split('_')[1]+'.nii.gz') #
     torch.cuda.empty_cache()
 
-def test(model,genObj,dh):
+def test(model,genObj,dh,nBatches):
     model.eval()
     for m in range(nBatches):
         X, case = genObj.__next__()
-        predictAndSave(X,model,dh)
+        predictAndSave(X,case,model,dh)
  
 class DUN(nn.Module):
     def __init__(self,encoder,decoder):
@@ -169,7 +169,7 @@ class DUN(nn.Module):
         return out
 
 def main():
-    batchSize = 2
+    batchSize = 1
     nSamples = 210
     valSplit = 20
     nTrnBatches = (nSamples - valSplit)//batchSize
@@ -187,12 +187,12 @@ def main():
     problemType = 'main'
     taskType = 'segment'
 
-    path = '/scratch/abhinavdhere/kits_train/'
-    # path = '/home/abhinav/kits_train/'
-    testPath = '/scratch/abhinavdhere/kits_test/'
+    # path = '/scratch/abhinavdhere/kits_train/'
+    path = '/home/abhinav/kits_train/'
+    testPath = '/home/abhinav/kits_test/'
     loadName = 'kidneyOnlySiamese.pt'
-    saveName =   'selfSiamese.pt' # 'models/segKidney.pt'
-    model = torch.load(saveName).cuda()
+    saveName =   'models/segKidney.pt' # 'selfSiamese.pt' # 
+    model = torch.load(saveName).cuda(gpuID)
     # saveName = 'segKidneySelf.pt'
     # proxyModel = torch.load(loadName)
     # pretrained_dict = proxyModel.state_dict()
@@ -215,11 +215,11 @@ def main():
     testDh = dataHandler(testPath,testBatchSize,valSplit=0,dataShapeMultiple=16,gpuID=gpuID)
     testDataLoader = testDh.giveGenerator('test',problemType)
 
-    for epoch in range(initEpochNum, initEpochNum+nEpochs):
+    # for epoch in range(initEpochNum, initEpochNum+nEpochs):
         # train(model,trainDataLoader,optimizer,epoch,batchSize,nTrnBatches,taskType)
-        validate(model,valDataLoader,epoch,batchSize,nValBatches,taskType,dh)
+        # validate(model,valDataLoader,epoch,batchSize,nValBatches,taskType,dh)
         # torch.save(model,saveName)
-    # test(model,testDataLoader,0,batchSize,nTestBatches,testDh)
+    test(model,testDataLoader,testDh,nTestBatches)
     ## GradCam  
     # vol,label = valDataLoader.__next__()
     # 
@@ -234,7 +234,7 @@ def main():
     #     calculate_outputs_and_gradients, baseline=baseline, steps=100, cuda=True)
 
 if __name__ == '__main__':
-    gpuID = 0
+    gpuID = 3
     main()
 
 ## ----------------------
