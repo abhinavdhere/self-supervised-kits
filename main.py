@@ -10,10 +10,16 @@ import numpy as np
 import SimpleITK as sitk
 
 from dataHandlers import dataHandler
-from networks import dense_unet_encoder as encoder #SimpleNetEncoder as encoder
-from networks import dense_unet_decoder as decoder
-from utils import myBCELoss, toCategorical, dice_coeff, integralDice, compare_models, contrastiveLoss
 
+from networks import (
+    unetEncoder as encoder,
+    unetDecoder as decoder
+    )
+
+from utils import myBCELoss, toCategorical, dice_coeff, integralDice, compare_models, contrastiveLoss, getClassWts
+
+# from networks import dense_unet_encoder as encoder #SimpleNetEncoder as encoder
+# from networks import dense_unet_decoder as decoder
 # from gradCam import GradCam
 # from integratedGradientPytorch.integrated_gradients import integrated_gradients
 # from integratedGradientPytorch.utils import calculate_outputs_and_gradients
@@ -37,7 +43,7 @@ def saveVolume(vol,fileName):
             vol = vol.astype('uint8')
     writer.Execute(sitk.GetImageFromArray(vol.swapaxes(0,2)))
 
-def predictAndGetLoss(model,X,y,batchSize,taskType):
+def predictAndGetLoss(model,X,y,batchSize,classWts,taskType):
     '''
     Generate predictions and calculate loss as well as skeleton info for metric,
     as per the given task - binary classification, siamese n/w classification or segmentation
@@ -47,7 +53,7 @@ def predictAndGetLoss(model,X,y,batchSize,taskType):
         dims = 1
     elif taskType=='segment':
         dims = 3
-    yOH = toCategorical(batchSize,y.cpu(),2,dims).cuda(gpuID)
+    yOH = toCategorical(batchSize,y.cpu(),3,dims).cuda(gpuID)
     if taskType=='classifyDirect':
         out,_,_,_ = model.forward(X)
         loss = 0
@@ -71,14 +77,20 @@ def predictAndGetLoss(model,X,y,batchSize,taskType):
         pred = torch.argmax(out,1)
         loss = 0
         diceCoeff = 0
-        for i in range(2):
-            loss += ( 1-dice_coeff(out[:,i,:,:,:].float(),yOH[:,i,:,:,:].float()) )
-            if i>0:
+        for i in range(3):
+            lossBCE = myBCELoss(classWts[i]).forward(out[:,i],yOH[:,i])  
+            lossDice = ( 1-dice_coeff(out[:,i,:,:,:].float(),yOH[:,i,:,:,:].float()) )
+            loss += lossBCE + lossDice
+            if i==1:
+                pred[pred==2] = 1
+                y[y==2] = 1
+                diceCoeff += integralDice(pred.float().detach().cpu(),y[:,0,:,:,:].float().detach(),i)
+            elif i==2:
                 diceCoeff += integralDice(pred.float().detach().cpu(),y[:,0,:,:,:].float().detach(),i)
         dataForMetric = diceCoeff
     return loss, dataForMetric
 
-def train(model,genObj,optimizer,epoch,batchSize,nBatches,taskType):
+def train(model,genObj,optimizer,epoch,batchSize,nBatches,classWts,taskType):
     runningLoss = 0.0
     runningDice = 0.0
     predList = []
@@ -86,9 +98,9 @@ def train(model,genObj,optimizer,epoch,batchSize,nBatches,taskType):
     model.train()
     with trange(nBatches,desc='Epoch '+str(epoch+1),ncols=100) as t:
         for m in range(nBatches):
-            X,y = genObj.__next__()
+            X,y,_,_ = genObj.__next__()
             optimizer.zero_grad()
-            # loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+            loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,classWts,taskType)
             if taskType=='classifyDirect':
                 predList.extend(dataForMetric[0])
                 labelList.extend(dataForMetric[1])
@@ -105,11 +117,10 @@ def train(model,genObj,optimizer,epoch,batchSize,nBatches,taskType):
     elif taskType=='classifySiamese':
         print('Epoch num. %d \t Trn. Loss : %.7f ; \t ' %(epoch+1,runningLoss/( (m+1)*batchSize) ))
     elif taskType=='segment':
-        print(runningDice)
         dice = runningDice / (m+1)
         print('Epoch num. %d \t Trn. Loss : %.7f ; \t Trn. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))        
 
-def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
+def validate(model,genObj,epoch,batchSize,nBatches,classWts,taskType,dh):
     runningLoss = 0.0
     runningDice = 0.0
     predList = []
@@ -120,7 +131,7 @@ def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
         # if case=='case_00022' and direction=='right':
         # pdb.set_trace()
         # predictAndSave(X,case,model,dh)
-        loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+        loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,classWts,taskType)
         if taskType=='classifyDirect':
             predList.extend(dataForMetric[0])
             labelList.extend(dataForMetric[1])
@@ -179,8 +190,8 @@ def main():
     nTestSamples = 90
     nTestBatches = nSamples // batchSize
 
-    nEpochs = 1#20
-    lr = 5e-4
+    nEpochs = 20
+    lr = 1e-3
     weightDecay = 1e-2
     initEpochNum = int(sys.argv[1])
 
@@ -188,22 +199,22 @@ def main():
     taskType = 'segment'
 
     # path = '/scratch/abhinavdhere/kits_train/'
-    path = '/home/abhinav/kits_train/'
-    testPath = '/home/abhinav/kits_test/'
+    path = '/home/abhinav/kits_resampled/Train/'
+    testPath = '/home/abhinav/kits_resampled/Test/'
     loadName = 'kidneyOnlySiamese.pt'
-    saveName =   'models/segKidney.pt' # 'selfSiamese.pt' # 
-    model = torch.load(saveName).cuda(gpuID)
+    saveName =  'segKidney_wAug_multiClass.pt'  # 'selfSiamese.pt' # 'models/segKidney.pt' 
+    # model = torch.load(saveName).cuda(gpuID)
     # saveName = 'segKidneySelf.pt'
     # proxyModel = torch.load(loadName)
     # pretrained_dict = proxyModel.state_dict()
-    # encoderModel = encoder().cuda()
+    encoderModel = encoder().cuda()
     # encoderModel.load_state_dict(pretrained_dict,strict=False)
     # compare_models(proxyModel, encoderModel)
     # del proxyModel
     # del pretrained_dict   
     # torch.cuda.empty_cache()
-    # decoderModel = decoder().cuda()
-    # model = DUN(encoderModel,decoderModel)
+    decoderModel = decoder().cuda()
+    model = DUN(encoderModel,decoderModel)
     # model = encoder().cuda(gpuID)
     # model = nn.DataParallel(model)
     dh = dataHandler(path,batchSize,valSplit,16,gpuID)
@@ -212,14 +223,17 @@ def main():
     trainDataLoader = dh.giveGenerator('train',problemType)
     valDataLoader = dh.giveGenerator('val',problemType)
 
-    testDh = dataHandler(testPath,testBatchSize,valSplit=0,dataShapeMultiple=16,gpuID=gpuID)
-    testDataLoader = testDh.giveGenerator('test',problemType)
+    # wts = getClassWts(nTrnBatches,trainDataLoader)
+    wts = [1,15,38.5]#[1,1500,3850]
 
-    # for epoch in range(initEpochNum, initEpochNum+nEpochs):
-        # train(model,trainDataLoader,optimizer,epoch,batchSize,nTrnBatches,taskType)
-        # validate(model,valDataLoader,epoch,batchSize,nValBatches,taskType,dh)
-        # torch.save(model,saveName)
-    test(model,testDataLoader,testDh,nTestBatches)
+    # testDh = dataHandler(testPath,testBatchSize,valSplit=0,dataShapeMultiple=16,gpuID=gpuID)
+    # testDataLoader = testDh.giveGenerator('test',problemType)
+
+    for epoch in range(initEpochNum, initEpochNum+nEpochs):
+        train(model,trainDataLoader,optimizer,epoch,batchSize,nTrnBatches,wts,taskType)
+        torch.save(model,saveName)
+        validate(model,valDataLoader,epoch,batchSize,nValBatches,wts,taskType,dh)
+    # test(model,testDataLoader,testDh,nTestBatches)
     ## GradCam  
     # vol,label = valDataLoader.__next__()
     # 
@@ -234,7 +248,7 @@ def main():
     #     calculate_outputs_and_gradients, baseline=baseline, steps=100, cuda=True)
 
 if __name__ == '__main__':
-    gpuID = 3
+    gpuID = 0
     main()
 
 ## ----------------------
