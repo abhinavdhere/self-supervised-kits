@@ -6,6 +6,8 @@ import SimpleITK as sitk
 
 import torch
 from sklearn.model_selection import train_test_split
+from scipy.ndimage.interpolation import rotate
+import scipy.ndimage as spIm
 
 # from keras.utils import to_categorical
 
@@ -35,6 +37,29 @@ class dataHandler(object):
         coronalMin, coronalMax = np.where(np.any(vol, axis=(0,2)))[0][[0,-1]]
         sagMin, sagMax = np.where(np.any(vol, axis=(0,1)))[0][[0,-1]]
         return axialMin,axialMax,coronalMin,coronalMax,sagMin,sagMax
+
+    def getPerturbation(self,vol):
+        '''
+        Get perturbed versions of original volume for data distillation by translation and flipping 
+        '''
+        augFlag = np.random.choice([0,1])
+        if augFlag==0:
+            vol = vol        
+        elif augFlag==1:
+            augIdx = np.random.choice(4)
+            if augIdx==0:
+                transVal = np.random.choice([-10,10])
+                tfmMat = np.eye(4,4)
+                tfmMat[:3,-1] = transVal
+                vol = spIm.affine_transform(vol,tfmMat,vol.shape)
+            elif augIdx==1:
+                vol = np.flip(vol,1).copy()
+            elif augIdx==2:
+                vol = np.flip(vol,0).copy()
+            elif augIdx==3:
+                rotAng = np.random.choice([-20,-10,10,20])
+                vol = spIm.rotate(vol,rotAng,reshape=False)
+        return vol
 
     def resizeToNearestMultiple(self,vol,base):
         diffList = []
@@ -83,16 +108,16 @@ class dataHandler(object):
 
     def loadVolume(self,caseName,sectionSide,volType):
         if volType=='data':
-            vol = sitk.ReadImage(self.path+caseName+'/resampled_vol.nii.gz')
+            vol = sitk.ReadImage(self.path+caseName+'/imaging.nii.gz')
             self.origSize = vol.GetSize()
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
             vol[vol<self.window[0]] = self.window[0]
             vol[vol>self.window[1]] = self.window[1]
             vol = (vol - np.mean(vol))/np.std(vol)
         elif volType=='label':
-            vol = sitk.ReadImage(self.path+caseName+'/resampled_labels.nii.gz')
+            vol = sitk.ReadImage(self.path+caseName+'/segmentation.nii.gz')
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
-            vol[vol==2] = 1
+            # vol[vol==2] = 1
         vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple*2)
         if sectionSide=='left':
             vol = vol[:,:,(vol.shape[2]//2):]
@@ -138,7 +163,7 @@ class dataHandler(object):
                     # yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
                     count = 0 ; volArr = [] ; labelArr = []
 
-    def loadSegData(self,fileList,isTest=False):
+    def loadSegData(self,fileList,isTrn,isTest=False):
         while True:
             fileList = np.random.permutation(fileList)
             directions = ['left','right']
@@ -147,18 +172,25 @@ class dataHandler(object):
             directionList = []
             count = 0
             for case in fileList:
+                # pdb.set_trace()
                 if not isTest:
                     directions = np.random.permutation(directions)
                 for direction in directions:
                     vol = self.loadVolume(case,direction,'data')
                     # vol = self.resizeToNearestMultiple(fullVol,self.dataShapeMultiple)
-                    vol = torch.Tensor(vol).cuda(self.gpuID)
-                    volArr.append(vol)
                     if not isTest:
                         segLabel = self.loadVolume(case,direction,'label')
                         if segLabel.dtype=='uint16':
                             segLabel = segLabel.astype('uint8')
                         segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
+                        if len(np.unique(segLabel))>3:
+                            pdb.set_trace()
+                    # if isTrn:
+                    #     vol = self.getPerturbation(vol)
+                    #     segLabel = self.getPerturbation(segLabel)
+                    vol = torch.Tensor(vol).cuda(self.gpuID)
+                    volArr.append(vol)
+                    if not isTest:
                         label = torch.Tensor(segLabel).long().cuda(self.gpuID)
                         labelArr.append(label)
                     count+=1
@@ -174,13 +206,13 @@ class dataHandler(object):
     def giveGenerator(self,genType,task):
         if task=='main' and genType=='train':
             fList = self.trainFileList
-            return self.loadSegData(fList)
+            return self.loadSegData(fList,True)
         elif task=='main' and genType=='val':
             fList = self.valFileList
-            return self.loadSegData(fList)
+            return self.loadSegData(fList,False)
         elif task=='main' and genType=='test':
             fList = self.trainFileList
-            return self.loadSegData(fList,True)
+            return self.loadSegData(fList,False)
         elif task=='proxy' and genType=='train':
             fList = self.trainFileList
             return self.loadProxyData(fList)
