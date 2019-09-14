@@ -5,6 +5,7 @@ from torch.autograd import Variable, Function
 import torch.nn.modules.normalization as norms
 
 import numpy as np
+import pdb
 
 class unetConv3(nn.Module):
     def __init__(self, in_size, out_size, is_batchnorm):
@@ -94,6 +95,24 @@ class SingleLayer(nn.Module):
 
     def forward(self, x):
         out = self.conv1(F.relu(self.bn1(x)))
+        out = torch.cat((x, out), 1)
+        return out
+
+class Bottleneck(nn.Module):
+    def __init__(self, nChannels, growthRate):
+        super(Bottleneck, self).__init__()
+        interChannels = 4*growthRate
+        self.bn1 = nn.BatchNorm2d(nChannels)
+        self.conv1 = nn.Conv2d(nChannels, interChannels, kernel_size=1,
+                               bias=True)
+        self.bn2 = nn.BatchNorm2d(interChannels)
+        self.conv2 = nn.Conv2d(interChannels, growthRate, kernel_size=3,
+                               padding=0, bias=True)
+
+    def forward(self, x):
+        out = self.conv1(F.relu(self.bn1(x)))
+        out = self.conv2(F.relu(self.bn2(out)))
+        out = F.pad(out,(1,1,1,1),mode='replicate')
         out = torch.cat((x, out), 1)
         return out
 
@@ -209,3 +228,21 @@ def compare_models(model_1, model_2):
 #                raise Exception
     if models_differ == 0:
         print('Models match perfectly! :)')
+
+def getClassWts(nBatches,trainGenObj):
+    wtList = []
+    ct = 0
+    for i in range(2,3):
+        weight = 0
+        for j in range(nBatches):
+            vol,labels,case,_ = trainGenObj.__next__()
+            if 2 in torch.unique(labels):
+                wt = torch.sum(labels[0,0,:,:,:]==i).float() / (labels.shape[2]*labels.shape[3]*labels.shape[4])
+                weight+=(1/wt)
+                ct+=1
+            # print(case+': '+str(1/wt)+' Average so far: '+str(weight.float()/j))
+        avWt = weight/float(ct)#float(j-1)#285
+        wtList.append(avWt)
+        # timeTaken = time.time() - initTime
+        print(wtList)
+    return wtList
