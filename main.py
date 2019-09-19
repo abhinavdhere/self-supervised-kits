@@ -2,6 +2,8 @@ import torch
 import torch.optim
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 import pdb
 import sys
 from tqdm import trange
@@ -43,7 +45,7 @@ def saveVolume(vol,fileName):
             vol = vol.astype('uint8')
     writer.Execute(sitk.GetImageFromArray(vol.swapaxes(0,2)))
 
-def predictAndGetLoss(model,X,y,batchSize,classWts,taskType):
+def predictAndGetLoss(model,X,y,batchSize,classWts,taskType,isVal):
     '''
     Generate predictions and calculate loss as well as skeleton info for metric,
     as per the given task - binary classification, siamese n/w classification or segmentation
@@ -73,26 +75,36 @@ def predictAndGetLoss(model,X,y,batchSize,classWts,taskType):
         loss = contrastiveLoss(out1,out2,pairLabel,1)
         dataForMetric = None
     elif taskType=='segment':
-        out = model.forward(X)
-        pred = torch.argmax(out,1)
+        if not isVal:
+            out = model.forward(X)
+        else:
+            out = model.forward(X).detach()
+            yOH = yOH.detach()
+        pred = torch.argmax(out,1).detach()
         loss = 0
         diceCoeff = 0
+        diceClasses = 0
         for i in range(3):
+            # pdb.set_trace()
             lossBCE = myBCELoss(classWts[i]).forward(out[:,i],yOH[:,i])  
-            lossDice = ( 1-dice_coeff(out[:,i,:,:,:].float(),yOH[:,i,:,:,:].float()) )
-            loss += lossBCE + lossDice
-            if i==1:
-                pred[pred==2] = 1
-                y[y==2] = 1
-                diceCoeff += integralDice(pred.float().detach().cpu(),y[:,0,:,:,:].float().detach(),i)
-            elif i==2:
-                diceCoeff += integralDice(pred.float().detach().cpu(),y[:,0,:,:,:].float().detach(),i)
-        dataForMetric = diceCoeff
+            # lossDice = ( 1-dice_coeff(out[:,i,:,:,:].float(),yOH[:,i,:,:,:].float()) )
+            loss += lossBCE #+ lossDice
+        dataForMetric = pred#diceCoeff
     return loss, dataForMetric
+
+def getDiceMetrics(pred,label):
+    predKidney = pred.clone()
+    predKidney[predKidney==2] = 1
+    labelKidney = label.clone()
+    labelKidney[labelKidney==2] = 1
+    diceCoeffKidney = integralDice(predKidney.float(),labelKidney[0].float(),1)
+    diceCoeffTumor = integralDice(pred.float(),label[0].float(),2)
+    return diceCoeffKidney,diceCoeffTumor
 
 def train(model,genObj,optimizer,epoch,batchSize,nBatches,classWts,taskType):
     runningLoss = 0.0
-    runningDice = 0.0
+    runningDiceKidney = 0.0
+    runningDiceTumor = 0.0
     predList = []
     labelList = []
     model.train()
@@ -100,16 +112,23 @@ def train(model,genObj,optimizer,epoch,batchSize,nBatches,classWts,taskType):
         for m in range(nBatches):
             X,y,_,_ = genObj.__next__()
             optimizer.zero_grad()
-            loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,classWts,taskType)
             if taskType=='classifyDirect':
                 predList.extend(dataForMetric[0])
                 labelList.extend(dataForMetric[1])
             elif taskType=='segment':
-                runningDice += dataForMetric
-            runningLoss += loss.item()
+                loss, pred = predictAndGetLoss(model,X,y,batchSize,classWts,taskType,False)
+                fullPred = torch.cat([pred[1],pred[0]],-1)
+                torch.cuda.empty_cache()
+                fullLabel = torch.cat([y[1].cpu(),y[0].cpu()],-1)
+                # pdb.set_trace()
+                diceCoeffKidney,diceCoeffTumor = getDiceMetrics(fullPred.cpu(),fullLabel.detach().cpu())
+                runningDiceKidney += diceCoeffKidney
+                runningDiceTumor += diceCoeffTumor
+                # loss = (loss1 + loss2)
+            runningLoss += loss 
             loss.backward()
             optimizer.step()
-            t.set_postfix(loss=runningLoss/(float(m+1)*batchSize))
+            t.set_postfix(loss=runningLoss.item()/(float(m+1)*batchSize))
             t.update()
     if taskType=='classifyDirect':
         acc = globalAcc(predList,labelList)
@@ -117,12 +136,15 @@ def train(model,genObj,optimizer,epoch,batchSize,nBatches,classWts,taskType):
     elif taskType=='classifySiamese':
         print('Epoch num. %d \t Trn. Loss : %.7f ; \t ' %(epoch+1,runningLoss/( (m+1)*batchSize) ))
     elif taskType=='segment':
-        dice = runningDice / (m+1)
-        print('Epoch num. %d \t Trn. Loss : %.7f ; \t Trn. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))        
+        diceKidney = runningDiceKidney / (m+1)
+        diceTumor = runningDiceTumor / (m+1)
+        print('Epoch num. %d \t Trn. Loss : %.7f ; \t Kidney Trn. Dice : %.3f ; \t Tumor Trn. Dice : %.3f' 
+            %(epoch+1,runningLoss/( (m+1)*batchSize), diceKidney, diceTumor ))        
 
-def validate(model,genObj,epoch,batchSize,nBatches,classWts,taskType,dh):
+def validate(model,genObj,epoch,scheduler,batchSize,nBatches,classWts,taskType,dh):
     runningLoss = 0.0
-    runningDice = 0.0
+    runningDiceKidney = 0.0
+    runningDiceTumor = 0.0
     predList = []
     labelList = []
     model.eval()
@@ -131,27 +153,37 @@ def validate(model,genObj,epoch,batchSize,nBatches,classWts,taskType,dh):
         # if case=='case_00022' and direction=='right':
         # pdb.set_trace()
         # predictAndSave(X,case,model,dh)
-        loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,classWts,taskType)
+        # loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,classWts,taskType,True)
         if taskType=='classifyDirect':
             predList.extend(dataForMetric[0])
             labelList.extend(dataForMetric[1])
         elif taskType=='segment':
-            runningDice += dataForMetric
+                loss, pred = predictAndGetLoss(model,X,y,batchSize,classWts,taskType,True)
+                fullPred = torch.cat([pred[1],pred[0]],-1)
+                # del pred1 ; del pred2 ; torch.cuda.empty_cache()
+                fullLabel = torch.cat([y[1].cpu(),y[0].cpu()],-1)
+                diceCoeffKidney,diceCoeffTumor = getDiceMetrics(fullPred.cpu(),fullLabel.detach().cpu())
+                runningDiceKidney += diceCoeffKidney
+                runningDiceTumor += diceCoeffTumor
         runningLoss += loss.item()
         # print('Case: '+case+' '+direction+' side ')#+str(dataForMetric.item()))
+    valLoss = runningLoss/( (m+1)*batchSize)
+    scheduler.step(valLoss)
     if taskType=='classifyDirect':
         acc = globalAcc(predList,labelList)
-        print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Acc : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), acc.item() ))
+        print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Acc : %.3f' %(epoch+1, valLoss, acc.item() ))
     elif taskType=='classifySiamese':
-        print('Epoch num. %d \t Val. Loss : %.7f ; \t ' %(epoch+1,runningLoss/( (m+1)*batchSize) ))
+        print('Epoch num. %d \t Val. Loss : %.7f ; \t ' %(epoch+1,valLoss ))
     elif taskType=='segment':
-        dice = runningDice / (m+1)
-        print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))   
+        diceKidney = runningDiceKidney / (m+1)
+        diceTumor = runningDiceTumor / (m+1)
+        print('Epoch num. %d \t Trn. Loss : %.7f ; \t Kidney Trn. Dice : %.3f ; \t Tumor Trn. Dice : %.3f' 
+            %(epoch+1,runningLoss/( (m+1)*batchSize), diceKidney, diceTumor ))     
 
 def predictAndSave(X,case,model,dh):
-    out = model.cuda(2).forward(X[0].cuda(2).unsqueeze(0))
+    out = model.cuda(0).forward(X[0].cuda(0).unsqueeze(0))
     pred1 = torch.argmax(out.cpu(),1)
-    out = model.cuda(3).forward(X[1].cuda(3).unsqueeze(0))
+    out = model.cuda(1).forward(X[1].cuda(1).unsqueeze(0))
     pred2 = torch.argmax(out.cpu(),1)
     fullPred = torch.cat([pred2,pred1],-1)
     fullPredResized = dh.cropResize(fullPred[0],())
@@ -159,13 +191,14 @@ def predictAndSave(X,case,model,dh):
     del pred2
     del out
     del X
-    saveVolume(fullPredResized,'testPreds_scratch/prediction_'+case.split('_')[1]+'.nii.gz') #
+    saveVolume(fullPredResized,'valPreds_scratch/prediction_'+case.split('_')[1]+'.nii.gz') #
     torch.cuda.empty_cache()
 
 def test(model,genObj,dh,nBatches):
     model.eval()
     for m in range(nBatches):
-        X, case = genObj.__next__()
+        # pdb.set_trace()
+        X, _ , case, _ = genObj.__next__()
         predictAndSave(X,case,model,dh)
  
 class DUN(nn.Module):
@@ -175,12 +208,14 @@ class DUN(nn.Module):
         self.decoder = decoder
 
     def forward(self,x):
-        x,c1_out,c2_out,c3_out = self.encoder(x)
-        out = self.decoder(x,c1_out,c2_out,c3_out)
+        c3,c2,c1 = self.encoder(x)
+        out = self.decoder(c3,c2,c1)
+        # x,c1_out,c2_out,c3_out = self.encoder(x)
+        # out = self.decoder(x,c1_out,c2_out,c3_out)
         return out
 
 def main():
-    batchSize = 1
+    batchSize = 2
     nSamples = 210
     valSplit = 20
     nTrnBatches = (nSamples - valSplit)//batchSize
@@ -190,8 +225,8 @@ def main():
     nTestSamples = 90
     nTestBatches = nSamples // batchSize
 
-    nEpochs = 20
-    lr = 1e-3
+    nEpochs = 10
+    lr = 5e-3
     weightDecay = 1e-2
     initEpochNum = int(sys.argv[1])
 
@@ -199,10 +234,10 @@ def main():
     taskType = 'segment'
 
     # path = '/scratch/abhinavdhere/kits_train/'
-    path = '/home/abhinav/kits_resampled/Train/'
-    testPath = '/home/abhinav/kits_resampled/Test/'
+    path = '/scratch/abhinavdhere/kits_resampled/Train/'#'/home/abhinav/kits_resampled/Train/'
+    # testPath = '/home/abhinav/kits_resampled/Test/'
     loadName = 'kidneyOnlySiamese.pt'
-    saveName =  'segKidney_wAug_multiClass.pt'  # 'selfSiamese.pt' # 'models/segKidney.pt' 
+    saveName =  'segKidney_multiClass_unet_bceOnly.pt'  # 'selfSiamese.pt' # 'models/segKidney.pt' 
     # model = torch.load(saveName).cuda(gpuID)
     # saveName = 'segKidneySelf.pt'
     # proxyModel = torch.load(loadName)
@@ -213,26 +248,30 @@ def main():
     # del proxyModel
     # del pretrained_dict   
     # torch.cuda.empty_cache()
-    decoderModel = decoder().cuda()
+    decoderModel = decoder(3).cuda()
     model = DUN(encoderModel,decoderModel)
     # model = encoder().cuda(gpuID)
-    # model = nn.DataParallel(model)
+    model = nn.DataParallel(model)
+    # pdb.set_trace()
     dh = dataHandler(path,batchSize,valSplit,16,gpuID)
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,weight_decay=weightDecay)
+    scheduler = ReduceLROnPlateau(optimizer,factor=0.5,patience=3,verbose=True)
 
     trainDataLoader = dh.giveGenerator('train',problemType)
     valDataLoader = dh.giveGenerator('val',problemType)
 
     # wts = getClassWts(nTrnBatches,trainDataLoader)
-    wts = [1,15,38.5]#[1,1500,3850]
+    wts = [1,1500,3850] # [1,15,38.5]
 
     # testDh = dataHandler(testPath,testBatchSize,valSplit=0,dataShapeMultiple=16,gpuID=gpuID)
     # testDataLoader = testDh.giveGenerator('test',problemType)
 
     for epoch in range(initEpochNum, initEpochNum+nEpochs):
-        train(model,trainDataLoader,optimizer,epoch,batchSize,nTrnBatches,wts,taskType)
-        torch.save(model,saveName)
-        validate(model,valDataLoader,epoch,batchSize,nValBatches,wts,taskType,dh)
+        # train(model,trainDataLoader,optimizer,epoch,batchSize,nTrnBatches,wts,taskType)
+        # torch.save(model,saveName)
+        # if (epoch)%2==0:
+            validate(model,valDataLoader,epoch,scheduler,batchSize,nValBatches,wts,taskType,dh)
+    # test(model,valDataLoader,dh,nValBatches)
     # test(model,testDataLoader,testDh,nTestBatches)
     ## GradCam  
     # vol,label = valDataLoader.__next__()
@@ -241,7 +280,6 @@ def main():
     # mask = gradCamObj(vol,label.item()) 
 
     ## IG
-    # pdb.set_trace()
     # X, labels = valDataLoader.__next__()
     # baseline = np.random.uniform(low=-71,high=304,size=X.shape)
     # integrated_grad = integrated_gradients(X.detach().cpu().numpy(), model, labels.detach().cpu().numpy(), \
@@ -252,6 +290,20 @@ if __name__ == '__main__':
     main()
 
 ## ----------------------
+            # if i==1 and len(torch.unique(y))>1:
+            #     predKidney = pred.clone()
+            #     predKidney[predKidney==2] = 1
+            #     labelKidney = y.clone()
+            #     labelKidney[labelKidney==2] = 1
+            #     diceCoeff += integralDice(predKidney.float().detach().cpu(),labelKidney[:,0,:,:,:].float().detach(),i)
+            #     diceClasses+=1
+            # elif i==2 and len(torch.unique(y))>2:
+            #     diceCoeff += integralDice(pred.float().detach().cpu(),y[:,0,:,:,:].float().detach(),i)
+            #     diceClasses+=1
+        # if diceClasses>0:
+        #     dataForMetric = diceCoeff/diceClasses
+        # else:
+
         # trainSegment(model,trainDataLoader,optimizer,epoch,batchSize,nTrnBatches)
         # validateSegment(model,valDataLoader,batchSize,nValBatches)
 
