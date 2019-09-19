@@ -15,7 +15,7 @@ class unetConv3(nn.Module):
             if in_size<64:
                 nGrps = 4
             else:
-                nGrps = 16 
+                nGrps = 8#16 
             self.conv1 = nn.Sequential(nn.Conv3d(in_size, out_size, 3, 1, 1),
                                        norms.GroupNorm(nGrps,out_size),
                                        nn.ReLU(),)
@@ -68,7 +68,7 @@ class Transition(nn.Module):
         if nChannels<64:
             nGrps = 4
         else:
-            nGrps = 16 
+            nGrps = 8#16 
         self.bn1 = norms.GroupNorm(nGrps,nChannels)
 #        self.bn1 = nn.BatchNorm2d(nChannels)
         self.conv1 = nn.Conv3d(nChannels, nOutChannels, kernel_size=1,
@@ -88,7 +88,7 @@ class SingleLayer(nn.Module):
         if nChannels<64:
             nGrps = 4
         else:
-            nGrps = 16 
+            nGrps = 8#16 
         self.bn1 = norms.GroupNorm(nGrps,nChannels)
         self.conv1 = nn.Conv3d(nChannels, growthRate, kernel_size=3,
                                padding=1, bias=False)
@@ -162,7 +162,7 @@ class myBCELoss(nn.Module):
 #        target = target[:,1,:,:,:]
 #        inputs = inputs[:,1,:,:,:]
         weights = 1 + (self.weight-1)*target # to make pos wt as self.weight and others as 1
-        loss = -((weights*target)*inputs.clamp(min=normVal).log()+(1-target)*(1-inputs).clamp(min=normVal).log()).sum()
+        loss = -((weights*target)*inputs.clamp(min=normVal).log()+(1-target)*(1-inputs).clamp(min=normVal).log()).mean()
         return loss 
 
 class DiceCoeff(Function):
