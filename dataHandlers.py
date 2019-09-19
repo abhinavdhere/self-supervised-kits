@@ -9,6 +9,8 @@ from sklearn.model_selection import train_test_split
 from scipy.ndimage.interpolation import rotate
 import scipy.ndimage as spIm
 
+# from batchgenerators.augmentations.crop_and_pad_augmentations import random_crop
+
 # from keras.utils import to_categorical
 
 class dataHandler(object):
@@ -40,7 +42,7 @@ class dataHandler(object):
 
     def getPerturbation(self,vol):
         '''
-        Get perturbed versions of original volume for data distillation by translation and flipping 
+        Get random augmentations for given volume. 
         '''
         augFlag = np.random.choice([0,1])
         if augFlag==0:
@@ -106,6 +108,18 @@ class dataHandler(object):
         resizedVol = vol[initVals[0]:endVals[0],initVals[1]:endVals[1],initVals[2]:endVals[2]]
         return resizedVol
 
+    def clipToMaxSize(self,vol,targetInitSize,targetEndSize):
+        diff = [vol.shape[i]-targetEndSize[i] for i in range(3)]
+        finalEndVals = []
+        for j,diffVal in enumerate(diff):
+            if diffVal>0:
+                endVal = targetEndSize[j]
+            else:
+                endVal = vol.shape[j]
+            finalEndVals.append(endVal)
+        vol = vol[targetInitSize[0]:finalEndVals[0],targetInitSize[1]:finalEndVals[1],targetInitSize[2]:finalEndVals[2]]
+        return vol
+
     def loadVolume(self,caseName,sectionSide,volType):
         if volType=='data':
             vol = sitk.ReadImage(self.path+caseName+'/imaging.nii.gz')
@@ -118,7 +132,7 @@ class dataHandler(object):
             vol = sitk.ReadImage(self.path+caseName+'/segmentation.nii.gz')
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
             # vol[vol==2] = 1
-        vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple*2)
+        vol = self.resizeToNearestMultiple(vol,2)
         if sectionSide=='left':
             vol = vol[:,:,(vol.shape[2]//2):]
         elif sectionSide=='right':
@@ -172,16 +186,17 @@ class dataHandler(object):
             directionList = []
             count = 0
             for case in fileList:
-                # pdb.set_trace()
-                if not isTest:
-                    directions = np.random.permutation(directions)
+                # if not isTest:
+                #     directions = np.random.permutation(directions)
                 for direction in directions:
                     vol = self.loadVolume(case,direction,'data')
-                    # vol = self.resizeToNearestMultiple(fullVol,self.dataShapeMultiple)
+                    vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
+                    vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
                     if not isTest:
                         segLabel = self.loadVolume(case,direction,'label')
                         if segLabel.dtype=='uint16':
                             segLabel = segLabel.astype('uint8')
+                        segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320])
                         segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
                         if len(np.unique(segLabel))>3:
                             pdb.set_trace()

@@ -8,8 +8,8 @@ from utils import unetConv3, Combiner, _make_dense, SingleLayer, Transition
 class unetEncoder(nn.Module):
     def __init__(self):
         super(unetEncoder,self).__init__()
-        seedChannels = 8
-        self.inputLayer = nn.Conv3d(1,seedChannels,3,stride=2)
+        seedChannels = 4
+        self.inputLayer = nn.Conv3d(1,seedChannels,3,stride=2,padding=1)
         self.conv1 = unetConv3(seedChannels,seedChannels*2,True) ; seedChannels*=2
         self.trans1 = Transition(seedChannels,seedChannels)        
         self.conv2 = unetConv3(seedChannels,seedChannels*2,True) ; seedChannels*=2
@@ -21,21 +21,21 @@ class unetEncoder(nn.Module):
     def forward(self,x):
         x = self.inputLayer(x)
         c1 = self.trans1(self.conv1(x))
-        x = self.trans2(self.conv2(c1))
-        c2 = self.trans3(self.conv3(x))
-        c3 = self.center(c2)
+        x = self.conv2(c1)
+        c2 = self.conv3(self.trans2(x))
+        c3 = self.center(self.trans3(c2))
         return c3,c2,c1
 
-class uNetDecoder(nn.Module):
+class unetDecoder(nn.Module):
     def __init__(self,nClasses):
         super(unetDecoder,self).__init__()
         self.combiner = Combiner()
-        seedChannels = 64
-        self.conv3 = unetConv3(seedChannels,seedChannels/2,True)         ; seedChannels/=2
+        seedChannels = 64#128
+        self.conv3 = unetConv3(seedChannels,seedChannels//2,True)         ; seedChannels//=2
         self.upTrans3 = nn.ConvTranspose3d(seedChannels,seedChannels,2,2)  
-        self.conv2 = unetConv3(seedChannels+16,seedChannels/2,True)         ; seedChannels/=2
+        self.conv2 = unetConv3(seedChannels*2,seedChannels//4,True)         ; seedChannels//=4
         self.upTrans2 = nn.ConvTranspose3d(seedChannels,seedChannels,2,2) 
-        self.conv1 = unetConv3(seedChannels+16,seedChannels/2,True)         ; seedChannels/=2
+        self.conv1 = unetConv3(seedChannels*2,seedChannels//2,True)         ; seedChannels//=2
         self.upTrans1 = nn.ConvTranspose3d(seedChannels,seedChannels,4,4)   # 4 times upsampling
         self.final = nn.Conv3d(seedChannels,nClasses,kernel_size=1)
 
