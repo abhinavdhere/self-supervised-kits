@@ -70,7 +70,7 @@ class dense_unet_encoder(nn.Module):
         return x,c1_out,c2_out,c3_out
 
 class dense_unet_decoder(nn.Module):
-    def __init__(self):
+    def __init__(self,nClasses):
         super(dense_unet_decoder,self).__init__() 
         self.combiner = Combiner()
         self.conv4 = unetConv3(144+16,128,True)         # +16 due to added channels from encoder, always 16 due to transition layer
@@ -79,7 +79,7 @@ class dense_unet_decoder(nn.Module):
         self.upTrans3 = nn.ConvTranspose3d(32,16,2,2)
         self.conv6 = unetConv3(16+16,4,True)
         self.upTrans4 = nn.ConvTranspose3d(4,4,2,2)
-        self.final = nn.Conv3d(4,3,kernel_size=1)
+        self.final = nn.Conv3d(4,nClasses,kernel_size=1)
 
     def forward(self,x,c1_out,c2_out,c3_out):
         x = self.conv4(self.combiner(c3_out,x))
@@ -90,6 +90,24 @@ class dense_unet_decoder(nn.Module):
         out = F.softmax(self.final(x),1)
         return out
 
+class dense_unet_autoencoder(nn.Module):
+    def __init__(self):
+        super(dense_unet_autoencoder,self).__init__() 
+        self.conv1 = unetConv3(144,128,True)
+        self.upTrans1 = nn.ConvTranspose3d(128,64,2,2) 
+        self.conv2 = unetConv3(64,32,True)
+        self.upTrans2 = nn.ConvTranspose3d(32,16,2,2)
+        self.conv3 = unetConv3(16,16,True)
+        self.upTrans3 = nn.ConvTranspose3d(16,16,4,4)
+        self.recons = nn.Conv3d(16,1,kernel_size=1)
+
+    def forward(self,x):
+        x = self.conv1(x)
+        x = self.conv2(self.upTrans1(x))
+        x = self.conv3(self.upTrans2(x))
+        x = self.upTrans3(x)
+        x = self.recons(x)
+        return x
 
 # self.adaptiveAP = nn.AdaptiveAvgPool3d((1,1,1))
 # self.final = nn.Conv3d(nFeat,2,kernel_size=1)
