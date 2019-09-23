@@ -122,16 +122,17 @@ class dataHandler(object):
 
     def loadVolume(self,caseName,sectionSide,volType):
         if volType=='data':
-            vol = sitk.ReadImage(self.path+caseName+'/imaging.nii.gz')
+            vol = sitk.ReadImage(self.path+caseName+'/resampled_vol.nii.gz')
             self.origSize = vol.GetSize()
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
             vol[vol<self.window[0]] = self.window[0]
             vol[vol>self.window[1]] = self.window[1]
             vol = (vol - np.mean(vol))/np.std(vol)
         elif volType=='label':
-            vol = sitk.ReadImage(self.path+caseName+'/segmentation.nii.gz')
+            vol = sitk.ReadImage(self.path+caseName+'/resampled_labels.nii.gz')
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
-            # vol[vol==2] = 1
+            # vol[vol==1] = 0
+            vol[vol==2] = 1
         vol = self.resizeToNearestMultiple(vol,2)
         if sectionSide=='left':
             vol = vol[:,:,(vol.shape[2]//2):]
@@ -186,17 +187,19 @@ class dataHandler(object):
             directionList = []
             count = 0
             for case in fileList:
-                # if not isTest:
-                #     directions = np.random.permutation(directions)
+                if not isTest:
+                    directions = np.random.permutation(directions)
                 for direction in directions:
                     vol = self.loadVolume(case,direction,'data')
-                    vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
+                    vol = self.clipToMaxSize(vol,[0,48,0],[160,256,160])  
+ #                   vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
                     vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
                     if not isTest:
                         segLabel = self.loadVolume(case,direction,'label')
                         if segLabel.dtype=='uint16':
                             segLabel = segLabel.astype('uint8')
-                        segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320])
+ #                       segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320])
+                        segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160]) 
                         segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
                         if len(np.unique(segLabel))>3:
                             pdb.set_trace()
