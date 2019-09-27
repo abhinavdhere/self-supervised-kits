@@ -75,7 +75,7 @@ def predictAndGetLoss(model,X,y,batchSize,taskType):
         for i in range(2):
             lossDice = ( 1-dice_coeff(out[:,i,:,:,:].float(),yOH[:,i,:,:,:].float()) )
             lossMSE = F.mse_loss(recons,X)
-            loss += (0.7*lossDice+0.3*lossMSE)
+            loss += (0.725*lossDice+0.275*lossMSE)
             if i>0:
                 diceCoeff += integralDice(pred.float().detach().cpu(),y[:,0,:,:,:].float().detach(),i)
         dataForMetric = diceCoeff
@@ -170,8 +170,8 @@ class DUN(nn.Module):
     def __init__(self,encoder):
         super(DUN,self).__init__()
         self.encoder = encoder
-        self.decoder = decoder(2).cuda()
-        self.autoEncoderModel = autoencoder().cuda()
+        self.decoder = nn.DataParallel(decoder(2).cuda())
+        self.autoEncoderModel = nn.DataParallel(autoencoder().cuda())
 
     def forward(self,x):
         x,c1_out,c2_out,c3_out = self.encoder(x)
@@ -190,31 +190,33 @@ def main():
     nTestSamples = 90
     nTestBatches = nSamples // batchSize
 
-    nEpochs = 10
-    lr = 1e-4
+    nEpochs = 3
+    lr = 5e-4#6.25e-5
     weightDecay = 1e-2
     initEpochNum = int(sys.argv[1])
 
     problemType = 'main' # 'proxy'
     taskType = 'segment' # 'classifySiamese'
 
-    path = '/scratch/abhinavdhere/kits_train/'
-    #path = '/home/abhinav/kits_train/'
+    # path = '/scratch/abhinavdhere/kits_train/'
+    path = '/home/abhinav/kits_train/'
     #testPath = '/scratch/abhinavdhere/kits_test/'
-    # loadName = 'kidneyOnlySiamese.pt'
-    saveName = 'scratch_tumor_dense_wAE.pt'
+    loadName = 'proxy_kidney_siamese.pt' #'kidneyOnlySiamese.pt'
+    saveName = 'self_tumor_dense_wAE.pt'
     # saveName =  'proxy_kidney_siamese.pt'#'scratch_tumor_dense.pt' #'selfSiamese.pt' # 'models/segKidney.pt'
     model = torch.load(saveName).cuda()
     # saveName = 'segKidneySelf.pt'
+
     # proxyModel = torch.load(loadName)
     # pretrained_dict = proxyModel.state_dict()
-    # encoderModel = encoder().cuda()
+    # encoderModel = nn.DataParallel(encoder().cuda())
     # encoderModel.load_state_dict(pretrained_dict,strict=False)
     # compare_models(proxyModel, encoderModel)
     # del proxyModel
     # del pretrained_dict   
     # torch.cuda.empty_cache()
     # model = DUN(encoderModel)
+    # model = nn.DataParallel(model)
     # model = encoder().cuda(gpuID)
     # model = nn.DataParallel(encoderModel)
     dh = dataHandler(path,batchSize,valSplit,16,gpuID)

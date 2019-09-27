@@ -132,7 +132,7 @@ class dataHandler(object):
             vol = sitk.ReadImage(self.path+caseName+'/resampled_labels.nii.gz')
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
             # vol[vol==1] = 0
-            vol[vol==2] = 1
+            vol[vol==2] = 1 # tumor to kidney
         vol = self.resizeToNearestMultiple(vol,2)
         if sectionSide=='left':
             vol = vol[:,:,(vol.shape[2]//2):]
