@@ -75,25 +75,27 @@ def predictAndGetLoss(model,X,y,batchSize,taskType):
         for i in range(2):
             lossDice = ( 1-dice_coeff(out[:,i,:,:,:].float(),yOH[:,i,:,:,:].float()) )
             lossMSE = F.mse_loss(recons,X)
-            loss += (0.725*lossDice+0.275*lossMSE)
+            loss += (0.75*lossDice+0.25*lossMSE)
             if i>0:
                 diceCoeff += integralDice(pred.float().detach().cpu(),y[:,0,:,:,:].float().detach(),i)
         dataForMetric = diceCoeff
-    return loss, dataForMetric
+    return loss,lossDice.item(),lossMSE.item(),dataForMetric
 
 def train(model,genObj,optimizer,scheduler,epoch,batchSize,nBatches,taskType):
     runningLoss = 0.0
+    runningLossDice = 0.0
+    runningLossMSE = 0.0
     runningDice = 0.0
     predList = []
     labelList = []
     model.train()
     with trange(nBatches,desc='Epoch '+str(epoch+1),ncols=100) as t:
         for m in range(nBatches):
+#            pdb.set_trace()
             X,y,_,_ = genObj.__next__()
             # X,y = genObj.__next__()
-            # pdb.set_trace()
             optimizer.zero_grad()
-            loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+            loss, lossDice, lossMSE, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
             if taskType=='classifyDirect':
                 predList.extend(dataForMetric[0])
                 labelList.extend(dataForMetric[1])
@@ -101,6 +103,8 @@ def train(model,genObj,optimizer,scheduler,epoch,batchSize,nBatches,taskType):
                 runningDice += dataForMetric
                 # print(dataForMetric)
             runningLoss += loss.item()
+            runningLossDice += lossDice
+            runningLossMSE += lossMSE
             loss.backward()
             optimizer.step()
             t.set_postfix(loss=runningLoss/(float(m+1)*batchSize))
@@ -113,29 +117,36 @@ def train(model,genObj,optimizer,scheduler,epoch,batchSize,nBatches,taskType):
     elif taskType=='segment':
         # print(runningDice)
         batchLoss = runningLoss/( (m+1)*batchSize)
-        scheduler.step(batchLoss)
+        batchLossDice = runningLossDice / ( (m+1)*batchSize)
+        batchLossMSE = runningLossMSE / ( (m+1)*batchSize)
+        #scheduler.step(batchLoss)
         dice = runningDice / (m+1)
-        print('Epoch num. %d \t Trn. Loss : %.7f ; \t Trn. Dice : %.3f' %(epoch+1, batchLoss, dice ))        
+        print('Epoch num. %d  Trn. Loss : %.7f ; \t Trn. DiceLoss : %.7f ; \t Trn. MSELoss : %.7f ; \t Trn. Dice : %.3f' %(epoch+1, batchLoss, batchLossDice, batchLossMSE, dice ))        
 
 def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
     runningLoss = 0.0
     runningDice = 0.0
+    runningLossDice = 0.0
+    runningLossMSE = 0.0
     predList = []
     labelList = []
     model.eval()
     for m in range(nBatches):
-        # pdb.set_trace()
-        X,y,case,direction = genObj.__next__()
+#        pdb.set_trace()
+        X,y,case,direction = genObj.__next__()    
         # X,y = genObj.__next__()
         # if case=='case_00022' and direction=='right':
-        # predictAndSave(X,case,model,dh)
-        loss, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+#        predictAndSave(X,case,model,dh)
+        loss, lossDice, lossMSE, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+#        print(direction+'side of '+case+' has dice coeff '+str(dataForMetric))
         if taskType=='classifyDirect':
             predList.extend(dataForMetric[0])
             labelList.extend(dataForMetric[1])
         elif taskType=='segment':
             runningDice += dataForMetric
         runningLoss += loss.item()
+        runningLossDice += lossDice
+        runningLossMSE += lossMSE
         # print('Case: '+case+' '+direction+' side ')#+str(dataForMetric.item()))
     if taskType=='classifyDirect':
         acc = globalAcc(predList,labelList)
@@ -144,27 +155,42 @@ def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
         print('Epoch num. %d \t Val. Loss : %.7f ; \t ' %(epoch+1,runningLoss/( (m+1)*batchSize) ))
     elif taskType=='segment':
         dice = runningDice / (m+1)
-        print('Epoch num. %d \t Val. Loss : %.7f ; \t Val. Dice : %.3f' %(epoch+1,runningLoss/( (m+1)*batchSize), dice ))   
+        batchValLoss = runningLoss/( (m+1)*batchSize)
+        batchLossDice = runningLossDice / ( (m+1)*batchSize)
+        batchLossMSE = runningLossMSE / ( (m+1)*batchSize)
+        print('Epoch num. %d  Val. Loss : %.7f ; \t Val. DiceLoss : %.7f ; \t Val. MSELoss : %.7f ; \t Val. Dice : %.3f' %(epoch+1, batchValLoss , batchLossDice, batchLossMSE, dice ))   
+        return dice
+
+#def resizeToOriginal(vol,origSize):
+#    sizeDiff = [origSize[i] - vol.shape[i] for i in range(len(vol.shape))]
+#    for j in range(len(vol.shape)):
+#        if sizeDiff[j]<0:
+#            if  
 
 def predictAndSave(X,case,model,dh):
-    out = model.cuda(0).forward(X[0].cuda(0).unsqueeze(0))
+    out,_ = model.cuda(0).forward(X[0].cuda(0).unsqueeze(0))
     pred1 = torch.argmax(out.cpu(),1)
-    out = model.cuda(1).forward(X[1].cuda(1).unsqueeze(0))
+    leftPred = dh.cropSize(pred1,dh.leftSize) 
+    out,_ = model.cuda(0).forward(X[1].cuda(0).unsqueeze(0))
     pred2 = torch.argmax(out.cpu(),1)
-    fullPred = torch.cat([pred2,pred1],-1)
+    rightPred = dh.cropSize(pred2,dh.rightSize)
+    fullPred = torch.cat([rightPred,leftPred],-1)
     fullPredResized = dh.cropResize(fullPred[0],())
+#    fullPredResized = dh.resizeToSize(fullPred[0],dh.origSize)
     del pred1
     del pred2
     del out
     del X
-    saveVolume(fullPredResized,'prediction_'+case+'.nii.gz') #testPreds/
+    saveVolume(fullPredResized,'testPreds_self_corrected/prediction_'+case+'.nii.gz') #testPreds/
     torch.cuda.empty_cache()
 
-def test(model,genObj,dh):
+def test(model,genObj,dh,nBatches):
     model.eval()
+#    pdb.set_trace()
     for m in range(nBatches):
-        X, case = genObj.__next__()
-        predictAndSave(X,model,dh)
+        X, case, direction = genObj.__next__()
+#        if case=='case_00287':
+        predictAndSave(X,case,model,dh)
  
 class DUN(nn.Module):
     def __init__(self,encoder):
@@ -181,58 +207,72 @@ class DUN(nn.Module):
 
 def main():
     batchSize = 2
-    nSamples = 207*2
-    valSplit = 20*2
-    nTrnBatches = (nSamples - valSplit)//batchSize
-    nValBatches = valSplit 
+    nSamples = 207
+    valSize = 30
+    nTrnBatches = ((nSamples - valSize)*2)//batchSize
+    nValBatches = (valSize*2)//batchSize#valSplit
 
     testBatchSize = 2
     nTestSamples = 90
     nTestBatches = nSamples // batchSize
 
-    nEpochs = 3
-    lr = 5e-4#6.25e-5
-    weightDecay = 1e-2
+    nEpochs = 10
+    lr = 2.5e-4
+    weightDecay = 1e-3
     initEpochNum = int(sys.argv[1])
 
     problemType = 'main' # 'proxy'
     taskType = 'segment' # 'classifySiamese'
 
-    # path = '/scratch/abhinavdhere/kits_train/'
-    path = '/home/abhinav/kits_train/'
-    #testPath = '/scratch/abhinavdhere/kits_test/'
+    trnPath = '/scratch/abhinavdhere/kits_train/'
+    valPath = '/scratch/abhinavdhere/kits_val/'
+    #path = '/home/abhinav/kits_train/'
+    testPath = '/scratch/abhinavdhere/kits_test/'
     loadName = 'proxy_kidney_siamese.pt' #'kidneyOnlySiamese.pt'
-    saveName = 'self_tumor_dense_wAE.pt'
+    saveName = 'self_tumor_dense_wAE_revisited.pt'
+#    saveName = 'self_tumor_dense_wAE.pt'
+#    saveName = 'scratch_tumor_dense_wAE.pt'
     # saveName =  'proxy_kidney_siamese.pt'#'scratch_tumor_dense.pt' #'selfSiamese.pt' # 'models/segKidney.pt'
     model = torch.load(saveName).cuda()
     # saveName = 'segKidneySelf.pt'
 
-    # proxyModel = torch.load(loadName)
-    # pretrained_dict = proxyModel.state_dict()
-    # encoderModel = nn.DataParallel(encoder().cuda())
-    # encoderModel.load_state_dict(pretrained_dict,strict=False)
-    # compare_models(proxyModel, encoderModel)
-    # del proxyModel
-    # del pretrained_dict   
-    # torch.cuda.empty_cache()
-    # model = DUN(encoderModel)
-    # model = nn.DataParallel(model)
+#    proxyModel = torch.load(loadName)
+#    pretrained_dict = proxyModel.state_dict()
+#    encoderModel = nn.DataParallel(encoder().cuda())
+#    encoderModel.load_state_dict(pretrained_dict,strict=False)
+#    compare_models(proxyModel, encoderModel)
+#    del proxyModel
+#    del pretrained_dict   
+#    torch.cuda.empty_cache()
+#    model = DUN(encoderModel)
+#    model = nn.DataParallel(model)
     # model = encoder().cuda(gpuID)
     # model = nn.DataParallel(encoderModel)
-    dh = dataHandler(path,batchSize,valSplit,16,gpuID)
+    dh = dataHandler(trnPath,valPath,batchSize,valSize,16,gpuID)
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,weight_decay=weightDecay)
     scheduler = ReduceLROnPlateau(optimizer,factor=0.5,patience=3,verbose=True)
 
     trainDataLoader = dh.giveGenerator('train',problemType)
     valDataLoader = dh.giveGenerator('val',problemType)
-
-#    testDh = dataHandler(testPath,testBatchSize,valSplit=0,dataShapeMultiple=16,gpuID=gpuID)
+#    testDh = dataHandler(testPath,'',testBatchSize,valSplit=0,dataShapeMultiple=16,gpuID=gpuID)
 #    testDataLoader = testDh.giveGenerator('test',problemType)
-
-    for epoch in range(initEpochNum, initEpochNum+nEpochs):
-        train(model,trainDataLoader,optimizer,scheduler,epoch,batchSize,nTrnBatches,taskType)
-        torch.save(model,saveName)
-        validate(model,valDataLoader,epoch,batchSize,nValBatches,taskType,dh)
+#    test(model,testDataLoader,testDh,nTestBatches)
+#    statusFile = open('bestVal1.txt','r')
+#    bestValDice = float(statusFile.readline().strip('\n').split()[-1])
+#    statusFile.close()
+#    for epoch in range(initEpochNum, initEpochNum+nEpochs):
+#        train(model,trainDataLoader,optimizer,scheduler,epoch,batchSize,nTrnBatches,taskType)
+#        torch.save(model,saveName)
+#        valDice = validate(model,valDataLoader,epoch,batchSize,nValBatches,taskType,dh)
+#        if valDice > bestValDice:
+#            statusFile = open('bestVal1.txt','w')
+#            diff = valDice - bestValDice
+#            bestValDice = valDice
+#            torch.save(model,saveName.split('.')[0]+'_chkpt_'+str(epoch+1)+'epoch.pt')
+#            statusFile.write('Best Dice so far: '+str(bestValDice.item()))
+#            print('Model checkpoint saved since Dice has improved by '+str(diff))
+#            statusFile.close()
+ 
     # test(model,testDataLoader,0,batchSize,nTestBatches,testDh)
     ## GradCam  
     # vol,label = valDataLoader.__next__()

@@ -17,17 +17,20 @@ class dataHandler(object):
     '''
     Methods for loading and handling KiTS data
     '''
-    def __init__(self,path,batchSize,valSplit,dataShapeMultiple,gpuID,window=(-79,304)):
-        self.path = path
+    def __init__(self,trnPath,valPath,batchSize,valSplit,dataShapeMultiple,gpuID,window=(-79,304)):
+        self.trnPath = trnPath
+        self.valPath = valPath
         self.batchSize = batchSize  
         if batchSize>2:
             print('Warning: batchSize greater than 2 may cause problems as the sizes of volumes are varying')
-        self.fileList = os.listdir(path)
         self.dataShapeMultiple = dataShapeMultiple
         self.window = window
         if valSplit>0:
-            self.trainFileList,self.valFileList = train_test_split(self.fileList,test_size=valSplit,random_state=0)
+            self.trainFileList = os.listdir(trnPath)
+            self.valFileList = os.listdir(valPath)
+            #self.trainFileList,self.valFileList = train_test_split(self.fileList,test_size=valSplit,random_state=0)
         elif valSplit==0:
+            self.fileList = os.listdir(trnPath)
             self.trainFileList = self.fileList
         self.gpuID = gpuID
 
@@ -67,7 +70,7 @@ class dataHandler(object):
         diffList = []
         for i in range(3):
             nSlices = vol.shape[i]
-            reqSlices = base * np.ceil(nSlices/base)
+            reqSlices = base[i] * np.ceil(nSlices/base[i])
             diff = int(reqSlices - nSlices)
             if diff%2==0:
                 sizeVec = (diff//2,diff//2)
@@ -99,12 +102,15 @@ class dataHandler(object):
         endVals = []
         for j in range(3):
             diff = sizeDiff[j]
-            if sizeDiff[j]%2==0:
+            if sizeDiff[j]%2==0 and sizeDiff[j]>0:
                 initVals.append(diff//2)
                 endVals.append(size1[j]-diff//2)
-            elif sizeDiff[j]%2!=0:
+            elif sizeDiff[j]%2!=0 and sizeDiff[j]>0:
                 initVals.append( (diff-1)//2 )
                 endVals.append( size1[j] - (diff+1)//2 )
+            elif sizeDiff[j]<=0:
+                initVals.append(0)
+                endVals.append(size1[j])
         resizedVol = vol[initVals[0]:endVals[0],initVals[1]:endVals[1],initVals[2]:endVals[2]]
         return resizedVol
 
@@ -122,18 +128,18 @@ class dataHandler(object):
 
     def loadVolume(self,caseName,sectionSide,volType):
         if volType=='data':
-            vol = sitk.ReadImage(self.path+caseName+'/resampled_vol.nii.gz')
+            vol = sitk.ReadImage(caseName+'/resampled_vol.nii.gz') #'/imaging.nii.gz')
             self.origSize = vol.GetSize()
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
             vol[vol<self.window[0]] = self.window[0]
             vol[vol>self.window[1]] = self.window[1]
             vol = (vol - np.mean(vol))/np.std(vol)
         elif volType=='label':
-            vol = sitk.ReadImage(self.path+caseName+'/resampled_labels.nii.gz')
+            vol = sitk.ReadImage(caseName+'/resampled_labels.nii.gz')
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
             # vol[vol==1] = 0
             vol[vol==2] = 1 # tumor to kidney
-        vol = self.resizeToNearestMultiple(vol,2)
+        vol = self.resizeToNearestMultiple(vol,2)#(16,16,32))#self.dataShapeMultiple)
         if sectionSide=='left':
             vol = vol[:,:,(vol.shape[2]//2):]
         elif sectionSide=='right':
@@ -186,23 +192,29 @@ class dataHandler(object):
             labelArr = []
             directionList = []
             count = 0
+            if isTrn or isTest:
+                path = self.trnPath
+            elif (not isTrn) and (not isTest):
+                path = self.valPath 
             for case in fileList:
-                if not isTest:
+                if isTrn:
                     directions = np.random.permutation(directions)
                 for direction in directions:
-                    vol = self.loadVolume(case,direction,'data')
-                    vol = self.clipToMaxSize(vol,[0,48,0],[160,256,160])  
+                    vol = self.loadVolume(path+case,direction,'data')
+#                    vol = self.clipToMaxSize(vol,[0,48,0],[160,256,160])  
  #                   vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
                     vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
+                    if direction=='left':
+                        self.leftSize = vol.shape
+                    elif direction=='right':
+                        self.rightSize = vol.shape
                     if not isTest:
-                        segLabel = self.loadVolume(case,direction,'label')
+                        segLabel = self.loadVolume(path+case,direction,'label')
                         if segLabel.dtype=='uint16':
                             segLabel = segLabel.astype('uint8')
  #                       segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320])
-                        segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160]) 
+#                        segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160]) 
                         segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
-                        if len(np.unique(segLabel))>3:
-                            pdb.set_trace()
                     # if isTrn:
                     #     vol = self.getPerturbation(vol)
                     #     segLabel = self.getPerturbation(segLabel)
@@ -213,9 +225,10 @@ class dataHandler(object):
                         labelArr.append(label)
                     count+=1
                     directionList.append(direction)
+#                    print('Loaded '+direction+' side of '+case)
                     if count==self.batchSize:
                         if isTest:
-                            yield torch.stack(volArr).unsqueeze(1), case
+                            yield torch.stack(volArr).unsqueeze(1), case, direction
                         else:
                             yield torch.stack(volArr).unsqueeze(1), torch.stack(labelArr).unsqueeze(1), case, direction
                         # yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
@@ -230,7 +243,7 @@ class dataHandler(object):
             return self.loadSegData(fList,False)
         elif task=='main' and genType=='test':
             fList = self.trainFileList
-            return self.loadSegData(fList,False)
+            return self.loadSegData(fList,False,True)
         elif task=='proxy' and genType=='train':
             fList = self.trainFileList
             return self.loadProxyData(fList)
