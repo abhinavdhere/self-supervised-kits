@@ -51,7 +51,7 @@ class dataHandler(object):
         if augFlag==0:
             vol = vol        
         elif augFlag==1:
-            augIdx = np.random.choice(4)
+            augIdx = np.random.choice([0,1])
             if augIdx==0:
                 transVal = np.random.choice([-10,10])
                 tfmMat = np.eye(4,4)
@@ -70,7 +70,7 @@ class dataHandler(object):
         diffList = []
         for i in range(3):
             nSlices = vol.shape[i]
-            reqSlices = base[i] * np.ceil(nSlices/base[i])
+            reqSlices = base * np.ceil(nSlices/base)
             diff = int(reqSlices - nSlices)
             if diff%2==0:
                 sizeVec = (diff//2,diff//2)
@@ -126,7 +126,10 @@ class dataHandler(object):
         vol = vol[targetInitSize[0]:finalEndVals[0],targetInitSize[1]:finalEndVals[1],targetInitSize[2]:finalEndVals[2]]
         return vol
 
-    def loadVolume(self,caseName,sectionSide,volType):
+    def loadVolume(self,caseName,sectionSide,volType,organ):
+        '''
+        Load a volume and preprocess (windowing and splitting in half). organ - 'kidney', 'tumor' or 'both' 
+        '''
         if volType=='data':
             vol = sitk.ReadImage(caseName+'/resampled_vol.nii.gz') #'/imaging.nii.gz')
             self.origSize = vol.GetSize()
@@ -138,8 +141,13 @@ class dataHandler(object):
             vol = sitk.ReadImage(caseName+'/resampled_labels.nii.gz')
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
             # vol[vol==1] = 0
-            vol[vol==2] = 1 # tumor to kidney
-        vol = self.resizeToNearestMultiple(vol,2)#(16,16,32))#self.dataShapeMultiple)
+            if organ=='kidney':
+                vol[vol==2] = 1 # tumor to kidney
+            elif organ=='tumor':
+                vol[vol<2] = 0  # kidney made background
+            elif organ=='both':
+                pass            # for clarity 
+        vol = self.resizeToNearestMultiple(vol,2) # making even sized for splitting     (16,16,32))#self.dataShapeMultiple)
         if sectionSide=='left':
             vol = vol[:,:,(vol.shape[2]//2):]
         elif sectionSide=='right':
@@ -147,12 +155,20 @@ class dataHandler(object):
             # vol = np.fliplr(vol).copy()
         return vol
 
-    def loadProxyData(self,fileList):
+    def loadProxyData(self,fileList,proxyType,isVal):
         gpuID = 0
         targetSize = (64,112,112)
         fListLeft = [fName+'-left' for fName in fileList]
         fListRight = [fName+'-right' for fName in fileList]
         fileList = fListLeft + fListRight
+        if proxyType=='classifySiamese':
+            organ = 'kidney'
+        elif proxyType=='classifyDirect':
+            organ = 'both'
+        if isVal:
+            path = self.valPath
+        else:
+            path = self.trnPath
         while True:
             fileList = np.random.permutation(fileList)
             # directions = ['left','right']
@@ -163,15 +179,22 @@ class dataHandler(object):
                 case, direction = caseName.split('-')
                 # directions = np.random.permutation(directions)
                 # for direction in directions:
-                fullVol = self.loadVolume(case,direction,'data')
-                segLabel = self.loadVolume(case,direction,'label')
+                fullVol = self.loadVolume(path+case,direction,'data',organ)
+                segLabel = self.loadVolume(path+case,direction,'label',organ)
                 axialMin,axialMax,coronalMin,coronalMax,sagMin,sagMax = self.getBB(segLabel)
-                volKidneyOnly = fullVol*segLabel
-                vol = volKidneyOnly[axialMin:axialMax,coronalMin:coronalMax,sagMin:sagMax]
-                if direction=='left':
-                    label = 0
-                elif direction=='right':
-                    label = 1
+                if proxyType=='classifySiamese':
+                    volKidneyOnly = fullVol*segLabel
+                    vol = volKidneyOnly[axialMin:axialMax,coronalMin:coronalMax,sagMin:sagMax]
+                    if direction=='left':
+                        label = 0
+                    elif direction=='right':
+                        label = 1
+                elif proxyType=='classifyDirect':
+                    vol = fullVol[axialMin:axialMax,coronalMin:coronalMax,sagMin:sagMax]
+                    if 2 in np.unique(segLabel):                                        # check if tumor label is present
+                        label = 1
+                    else:
+                        label = 0
                 vol = self.resizeToSize(vol,targetSize)
                 # vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
                 vol = torch.Tensor(vol).cuda(self.gpuID)
@@ -180,11 +203,11 @@ class dataHandler(object):
                 labelArr.append(label)
                 count+=1
                 if count==self.batchSize:
-                    yield torch.stack(volArr).unsqueeze(1), torch.stack(labelArr)
+                    yield torch.stack(volArr).unsqueeze(1), torch.stack(labelArr), case, direction
                     # yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
                     count = 0 ; volArr = [] ; labelArr = []
 
-    def loadSegData(self,fileList,isTrn,isTest=False):
+    def loadSegData(self,fileList,taskType,isTrn,isTest=False):
         while True:
             fileList = np.random.permutation(fileList)
             directions = ['left','right']
@@ -195,29 +218,33 @@ class dataHandler(object):
             if isTrn or isTest:
                 path = self.trnPath
             elif (not isTrn) and (not isTest):
-                path = self.valPath 
+                path = self.valPath
+            if taskType=='segmentKidney':
+                organ = 'kidney'
+            elif taskType=='segmentTumor':
+                organ = 'tumor'
             for case in fileList:
                 if isTrn:
                     directions = np.random.permutation(directions)
                 for direction in directions:
-                    vol = self.loadVolume(path+case,direction,'data')
+                    vol = self.loadVolume(path+case,direction,'data',organ)
 #                    vol = self.clipToMaxSize(vol,[0,48,0],[160,256,160])  
  #                   vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
-                    vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
                     if direction=='left':
                         self.leftSize = vol.shape
                     elif direction=='right':
                         self.rightSize = vol.shape
+                    vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
                     if not isTest:
-                        segLabel = self.loadVolume(path+case,direction,'label')
+                        segLabel = self.loadVolume(path+case,direction,'label',organ)
                         if segLabel.dtype=='uint16':
                             segLabel = segLabel.astype('uint8')
  #                       segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320])
 #                        segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160]) 
                         segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
-                    # if isTrn:
-                    #     vol = self.getPerturbation(vol)
-                    #     segLabel = self.getPerturbation(segLabel)
+                    if isTrn:
+                         vol = self.getPerturbation(vol)
+                         segLabel = self.getPerturbation(segLabel)
                     vol = torch.Tensor(vol).cuda(self.gpuID)
                     volArr.append(vol)
                     if not isTest:
@@ -234,22 +261,22 @@ class dataHandler(object):
                         # yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
                         count = 0 ; volArr = [] ; labelArr = []
 
-    def giveGenerator(self,genType,task):
+    def giveGenerator(self,genType,task,taskType):
         if task=='main' and genType=='train':
             fList = self.trainFileList
-            return self.loadSegData(fList,True)
+            return self.loadSegData(fList,taskType,True)
         elif task=='main' and genType=='val':
             fList = self.valFileList
-            return self.loadSegData(fList,False)
+            return self.loadSegData(fList,taskType,False)
         elif task=='main' and genType=='test':
             fList = self.trainFileList
-            return self.loadSegData(fList,False,True)
+            return self.loadSegData(fList,taskType,False,True)
         elif task=='proxy' and genType=='train':
             fList = self.trainFileList
-            return self.loadProxyData(fList)
+            return self.loadProxyData(fList,taskType,isVal=False)
         elif task =='proxy' and genType=='val':
             fList = self.valFileList
-            return self.loadProxyData(fList)
+            return self.loadProxyData(fList,taskType,isVal=True)
 
 
 
