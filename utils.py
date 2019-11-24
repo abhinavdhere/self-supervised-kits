@@ -3,9 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable, Function
 import torch.nn.modules.normalization as norms
-
+import scipy.spatial.distance as distances
 import numpy as np
 import pdb
+import SimpleITK as sitk
+
+##  ------------------      Network components      -------------------------
 
 class unetConv3(nn.Module):
     def __init__(self, in_size, out_size, is_batchnorm):
@@ -135,6 +138,8 @@ def toCategorical(batch_size,yArr,nClasses,dims):
         y_OH.scatter_(1,yArr,1)
         return y_OH
 
+##  ------------------      Losses      -------------------------
+
 def contrastiveLoss(a,b,y,m,reduction='sum',gpuID=0):
     '''
     Contrastive loss LC=∑N,n=1 (y)d^2+ (1−y) max(0,m−d)^2 where d is L2 distance b/w a and b
@@ -204,6 +209,14 @@ def dice_coeff(input, target):
 
     return s / (i + 1)
 
+
+def tversky_loss(beta, y_true, y_pred):
+    numerator = torch.sum(y_true * y_pred)
+    denominator = y_true * y_pred + beta * (1 - y_true) * y_pred + (1 - beta) * y_true * (1 - y_pred)
+
+    return 1 - (numerator + 1) / (torch.sum(denominator) + 1)
+
+##  ------------------      Metrics      -------------------------
 def integralDice(pred,gt,k):
     '''
     Dice coefficient for multiclass hard thresholded prediction consisting of integers instead of binary
@@ -211,6 +224,37 @@ def integralDice(pred,gt,k):
     '''
     return torch.sum(pred[gt==k]==k)*2.0 / (torch.sum(pred[pred==k]==k) + torch.sum(gt[gt==k]==k)).float()
 
+def globalAcc(predList,labelList):
+    '''
+    Compute accuracy over all samples using list of predictions and labels.
+    '''
+    predList = torch.cat(predList)
+    labelList = torch.cat(labelList)
+    acc = torch.sum(predList==labelList).float()/( predList.shape[0] )
+    return acc
+
+def getHausdorff(pred,label):
+    u = np.where(pred.detach().cpu().numpy())
+    v = np.where(label.detach().cpu().numpy())
+    hd_u_v = distances.directed_hausdorff(u, v)[0]
+    hd_v_u = distances.directed_hausdorff(v, u)[0]
+    hd = max(hd_u_v,hd_v_u) / u[0].shape[0]
+    return hd
+
+##  ------------------      Aux      -------------------------
+def saveVolume(vol,fileName):
+    writer = sitk.ImageFileWriter()
+    writer.SetFileName(fileName)
+    if isinstance(vol,torch.Tensor):
+        if vol.requires_grad:
+            vol = vol.detach()
+        if vol.is_cuda:
+            vol = vol.cpu()
+        vol = vol.numpy()
+        if vol.dtype=='int64':
+            vol = vol.astype('uint8')
+    writer.Execute(sitk.GetImageFromArray(vol.swapaxes(0,2)))
+    
 def compare_models(model_1, model_2):
     '''
     Copied from https://discuss.pytorch.org/t/check-if-models-have-same-weights/4351/6 
@@ -232,15 +276,16 @@ def compare_models(model_1, model_2):
 def getClassWts(nBatches,trainGenObj):
     wtList = []
     ct = 0
-    for i in range(2,3):
+    for i in range(1,2):
         weight = 0
         for j in range(nBatches):
             vol,labels,case,_ = trainGenObj.__next__()
-            if 2 in torch.unique(labels):
-                wt = torch.sum(labels[0,0,:,:,:]==i).float() / (labels.shape[2]*labels.shape[3]*labels.shape[4])
-                weight+=(1/wt)
-                ct+=1
+            # if 2 in torch.unique(labels):
+            wt = torch.sum(labels[0,0,:,:,:]==i).float() / (labels.shape[2]*labels.shape[3]*labels.shape[4])
+            weight+=(1/wt)
+            ct+=1
             # print(case+': '+str(1/wt)+' Average so far: '+str(weight.float()/j))
+        pdb.set_trace()
         avWt = weight/float(ct)#float(j-1)#285
         wtList.append(avWt)
         # timeTaken = time.time() - initTime

@@ -8,7 +8,9 @@ import torch
 from sklearn.model_selection import train_test_split
 from scipy.ndimage.interpolation import rotate
 import scipy.ndimage as spIm
+import batchgenerators.augmentations as augmentor
 
+from utils import saveVolume
 # from batchgenerators.augmentations.crop_and_pad_augmentations import random_crop
 
 # from keras.utils import to_categorical
@@ -43,7 +45,7 @@ class dataHandler(object):
         sagMin, sagMax = np.where(np.any(vol, axis=(0,1)))[0][[0,-1]]
         return axialMin,axialMax,coronalMin,coronalMax,sagMin,sagMax
 
-    def getPerturbation(self,vol):
+    def getRandomPerturbation(self,vol):
         '''
         Get random augmentations for given volume. 
         '''
@@ -84,10 +86,13 @@ class dataHandler(object):
         sizeDiff = [sizeGiven[i] - vol.shape[i] for i in range(len(vol.shape))]
         sizeVecList = []
         for j in range(len(vol.shape)):
-            if sizeDiff[j]%2==0:
-                sizeVec = (sizeDiff[j]//2,sizeDiff[j]//2)
-            elif sizeDiff[j]%2!=0:
-                sizeVec = ( (sizeDiff[j]-1)//2,(sizeDiff[j]+1)//2)
+            if sizeDiff[j]>0:
+                if sizeDiff[j]%2==0:
+                    sizeVec = (sizeDiff[j]//2,sizeDiff[j]//2)
+                elif sizeDiff[j]%2!=0:
+                    sizeVec = ( (sizeDiff[j]-1)//2,(sizeDiff[j]+1)//2)
+            else:
+                sizeVec = ((0,0))
             sizeVecList.append(sizeVec)
         vol = np.pad( vol, ( sizeVecList[0], sizeVecList[1], sizeVecList[2]), mode='constant')
         return vol
@@ -145,6 +150,7 @@ class dataHandler(object):
                 vol[vol==2] = 1 # tumor to kidney
             elif organ=='tumor':
                 vol[vol<2] = 0  # kidney made background
+                vol[vol==2] = 1
             elif organ=='both':
                 pass            # for clarity 
         vol = self.resizeToNearestMultiple(vol,2) # making even sized for splitting     (16,16,32))#self.dataShapeMultiple)
@@ -207,9 +213,46 @@ class dataHandler(object):
                     # yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
                     count = 0 ; volArr = [] ; labelArr = []
 
+    def augment(self,vol,augIdx):
+        '''
+        Apply given augmentation for given volume. 
+        '''
+        if augIdx==0:
+            vol = vol
+        elif augIdx==1:
+            transVal = np.random.choice([-10,10])
+            tfmMat = np.eye(4,4)
+            tfmMat[:3,-1] = transVal
+            vol = spIm.affine_transform(vol,tfmMat,vol.shape)
+        # elif augIdx==2:
+        #     vol = np.flip(vol,1).copy()
+        elif augIdx==3:
+            rotAng = np.random.choice([-20,-10,10,20])
+            vol = spIm.rotate(vol,rotAng,reshape=False)
+        elif augIdx==4:
+            vol = spIm.zoom(vol,2)
+            augSize = vol.shape
+            vol = vol[(augSize[0]//4):(3*augSize[0]//4),augSize[1]//4:(3*augSize[1]//4),augSize[2]//4:3*augSize[2]//4]
+        elif augIdx==5:
+            intensityScaleFactor = np.random.choice([0.7,0.8,1.2,1.4])
+            vol = vol*intensityScaleFactor
+        elif augIdx==6:
+            vol = augmentor.noise_augmentations.augment_gaussian_noise(vol)
+        return vol
+
     def loadSegData(self,fileList,taskType,isTrn,isTest=False):
         while True:
             fileList = np.random.permutation(fileList)
+            # fileList = ['case_00118']
+            fListAug = []
+            if isTrn:
+                # augListMap = {'scaled':6}
+                augListMap = {'normal':0,'translated':1,'rotated':3,'scaled':4,'brightness':5,'gaussNoise':6} #'hflip':2
+            else:
+                augListMap = {'normal':0}
+            for aug in augListMap.keys():
+                fListAug += [fName+'-'+aug for fName in fileList]
+            fListAug = np.random.permutation(fListAug)
             directions = ['left','right']
             volArr = []
             labelArr = []
@@ -223,28 +266,50 @@ class dataHandler(object):
                 organ = 'kidney'
             elif taskType=='segmentTumor':
                 organ = 'tumor'
-            for case in fileList:
+            # organ = 'both'
+            for case in fListAug:
+                case, augType = case.split('-')
                 if isTrn:
                     directions = np.random.permutation(directions)
+                # pdb.set_trace()
                 for direction in directions:
-                    vol = self.loadVolume(path+case,direction,'data',organ)
-#                    vol = self.clipToMaxSize(vol,[0,48,0],[160,256,160])  
- #                   vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
-                    if direction=='left':
-                        self.leftSize = vol.shape
-                    elif direction=='right':
-                        self.rightSize = vol.shape
-                    vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
+                    if augType=='normal':
+                        vol = self.loadVolume(path+case,direction,'data',organ)
+                        if direction=='left':
+                            self.leftSize = vol.shape
+                        elif direction=='right':
+                            self.rightSize = vol.shape
+                        vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
+                    else:
+                        vol = sitk.ReadImage(path+case+'/augVol_'+augType+'_'+direction+'.nii.gz')
+                        vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
+                    vol = self.resizeToSize(vol,(160,256,160))
+                    vol = vol[0:160,48:256,0:160]  
+                   # vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
                     if not isTest:
-                        segLabel = self.loadVolume(path+case,direction,'label',organ)
+                        if augListMap[augType] in (0,5,6):
+                            segLabel = self.loadVolume(path+case,direction,'label',organ)
+                            segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
+                            # segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160])
+                        elif augListMap[augType] in (1,3,4):
+                            # pdb.set_trace()
+                            segLabel = sitk.ReadImage(path+case+'/augLabel_'+augType+'_'+direction+'.nii.gz')
+                            segLabel = sitk.GetArrayFromImage(segLabel).swapaxes(0,2)
+                        # segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160])
+                        segLabel = self.resizeToSize(segLabel,(160,256,160))
+                        segLabel = segLabel[0:160,48:256,0:160]
                         if segLabel.dtype=='uint16':
                             segLabel = segLabel.astype('uint8')
- #                       segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320])
-#                        segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160]) 
-                        segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
-                    if isTrn:
-                         vol = self.getPerturbation(vol)
-                         segLabel = self.getPerturbation(segLabel)
+                       # segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320]) 
+                    # if isTrn:
+                    #     augIdx = augListMap[augType]
+                    #     # vol = self.augment(vol,augIdx)
+                    #     if augIdx not in [5,6]:
+                    #         segLabel = self.augment(segLabel,augIdx)
+                    #         # pdb.set_trace()
+                    #         saveVolume(segLabel,path+case+'/augLabel_'+augType+'_'+direction+'.nii.gz')                            
+                        # 
+                        # saveVolume(vol,path+case+'/augVol_'+augType+'_'+direction+'.nii.gz')
                     vol = torch.Tensor(vol).cuda(self.gpuID)
                     volArr.append(vol)
                     if not isTest:
@@ -252,12 +317,14 @@ class dataHandler(object):
                         labelArr.append(label)
                     count+=1
                     directionList.append(direction)
-#                    print('Loaded '+direction+' side of '+case)
+                    # print('Loaded '+direction+' side of '+case+'for aug '+augType)
+                    # print(label.shape)
                     if count==self.batchSize:
                         if isTest:
                             yield torch.stack(volArr).unsqueeze(1), case, direction
                         else:
-                            yield torch.stack(volArr).unsqueeze(1), torch.stack(labelArr).unsqueeze(1), case, direction
+                            # yield 0,torch.stack(labelArr).unsqueeze(1),case,direction
+                            yield torch.stack(volArr).unsqueeze(1), torch.stack(labelArr).unsqueeze(1), case, direction+'_'+augType
                         # yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
                         count = 0 ; volArr = [] ; labelArr = []
 
