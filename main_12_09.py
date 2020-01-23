@@ -12,8 +12,9 @@ import numpy as np
 import SimpleITK as sitk
 import skimage.segmentation as segTools    
 from dataHandlers import dataHandler
-from networks import dense_unet_encoder as encoder #SimpleNetEncoder as encoder
-from networks import dense_unet_decoder as decoder, dense_unet_autoencoder as autoencoder
+from networks import unetEncoder as encoder; from networks import unetDecoder as decoder
+# from networks import dense_unet_encoder as encoder #SimpleNetEncoder as encoder
+# from networks import dense_unet_decoder as decoder, dense_unet_autoencoder as autoencoder
 from focalLoss import FocalLoss 
 from utils import ( 
 myBCELoss, dice_coeff, contrastiveLoss, tversky_loss,
@@ -65,7 +66,7 @@ def predictAndGetLoss(model,X,y,batchSize,taskType):
         dataForMetric = (predListBatch,labelListBatch)
         return loss, dataForMetric
     elif taskType=='segment' or taskType=='segmentKidney':
-        out,recons = model.forward(X)
+        out = model.forward(X)
         pred = torch.argmax(out,1)
         lossSeg = 0
         lossBCE = 0
@@ -80,10 +81,10 @@ def predictAndGetLoss(model,X,y,batchSize,taskType):
             #(0.9*lossDice+0.1*lossMSE)
             if i>0:
                 diceCoeff += integralDice(pred.float().detach().cpu(),y[:,0,:,:,:].float().detach(),i)
-        lossSeg = 0.4*lossBCE + 0.6*lossDice
-        lossMSE = F.mse_loss(recons,X)
-        loss = 0.9*lossSeg + 0.1*lossMSE
-        return loss,lossBCE.item(),lossDice.item(),lossMSE.item(),diceCoeff
+        loss = 0.2*lossBCE + 0.8*lossDice
+        # lossMSE = F.mse_loss(recons,X)
+        # loss = 0.9*lossSeg + 0.1*lossMSE
+        return loss,lossBCE.item(),lossDice.item(),diceCoeff#lossMSE.item(),diceCoeff
 
 def train(model,genObj,optimizer,scheduler,epoch,batchSize,nBatches,taskType):
     runningLoss = 0.0
@@ -106,11 +107,11 @@ def train(model,genObj,optimizer,scheduler,epoch,batchSize,nBatches,taskType):
             elif taskType=='classifySiamese':
                 loss = predictAndGetLoss(model,X,y,batchSize,taskType)
             elif taskType=='segment' or taskType=='segmentKidney':
-                loss, lossBCE, lossDice, lossMSE, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+                loss, lossBCE, lossDice, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
                 runningDice += dataForMetric
                 runningLossBCE += lossBCE
                 runninglossDice += lossDice
-                runningLossMSE += lossMSE
+                # runningLossMSE += lossMSE
             runningLoss += loss.item()
             loss.backward()
             optimizer.step()
@@ -126,11 +127,11 @@ def train(model,genObj,optimizer,scheduler,epoch,batchSize,nBatches,taskType):
         batchLoss = runningLoss/( (m+1)*batchSize)
         batchLossBCE = runningLossBCE / ( (m+1)*batchSize)
         batchlossDice = runninglossDice / ( (m+1)*batchSize)
-        batchLossMSE = runningLossMSE / ( (m+1)*batchSize)
+        # batchLossMSE = runningLossMSE / ( (m+1)*batchSize)
         #scheduler.step(batchLoss)
         dice = runningDice / (m+1)
-        print('Epoch num. %d  Trn. Loss : %.7f ;  Trn. BCE : %.7f ;  Trn. DL : %.7f ;  Trn. MSELoss : %.7f ;  Trn. Dice : %.3f' 
-            %(epoch+1, batchLoss, batchLossBCE, batchlossDice, batchLossMSE, dice ))        
+        print('Epoch num. %d  Trn. Loss : %.7f ;  Trn. BCE : %.7f ;  Trn. DL : %.7f ;  Trn. Dice : %.3f' 
+            %(epoch+1, batchLoss, batchLossBCE, batchlossDice, dice ))        
         # print('Alpha for FL is now '+str(model.alpha.item())+ '. Beta for TL is now '+str(model.beta.item()))
 
 def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
@@ -156,11 +157,11 @@ def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
             predList.extend(dataForMetric[0])
             labelList.extend(dataForMetric[1])
         elif taskType=='segment' or taskType=='segmentKidney':
-            loss, lossBCE, lossDice, lossMSE, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
+            loss, lossBCE, lossDice, dataForMetric = predictAndGetLoss(model,X,y,batchSize,taskType)
             runningDice += dataForMetric
             runningLossBCE += lossBCE
             runninglossDice += lossDice
-            runningLossMSE += lossMSE
+            # runningLossMSE += lossMSE
         runningLoss += loss.item()
     if taskType=='classifyDirect':
         acc = globalAcc(predList,labelList)
@@ -174,9 +175,9 @@ def validate(model,genObj,epoch,batchSize,nBatches,taskType,dh):
         batchValLoss = runningLoss/( (m+1)*batchSize)
         batchLossBCE = runningLossBCE / ( (m+1)*batchSize)
         batchlossDice = runninglossDice / ( (m+1)*batchSize)
-        batchLossMSE = runningLossMSE / ( (m+1)*batchSize)
-        print('Epoch num. %d Val. Loss : %.7f ;  Val. BCE : %.7f ; Val. DL : %.7f ;  Val. MSELoss : %.7f ;  Val. Dice : %.3f' 
-            %(epoch+1, batchValLoss , batchLossBCE, batchlossDice, batchLossMSE, dice ))   
+        # batchLossMSE = runningLossMSE / ( (m+1)*batchSize)
+        print('Epoch num. %d Val. Loss : %.7f ;  Val. BCE : %.7f ; Val. DL : %.7f ;  Val. Dice : %.3f' 
+            %(epoch+1, batchValLoss , batchLossBCE, batchlossDice, dice ))   
         # print('Alpha for FL is now '+str(model.alpha.item())+ '. Beta for TL is now '+str(model.beta.item()))
         return dice
 
@@ -234,42 +235,56 @@ def test(model,genObj,dh,nBatches):
         X, case, direction = genObj.__next__()
         predictAndSave(X,case,model,dh)
  
-class DUN(nn.Module):
+# class DUN(nn.Module):
+#     '''
+#     Dense U-Net for segmentation.
+#     '''
+#     def __init__(self,encoder):
+#         super(DUN,self).__init__()
+#         self.alpha = torch.nn.Parameter(torch.Tensor([0.5])).cuda()
+#         self.beta = torch.nn.Parameter(torch.Tensor([0.5])).cuda()
+#         self.encoder = encoder
+#         self.decoder = nn.DataParallel(decoder(2).cuda())
+#         self.autoEncoderModel = nn.DataParallel(autoencoder().cuda())
+
+#     def forward(self,x):
+#         x,c1_out,c2_out,c3_out = self.encoder(x)
+#         out = self.decoder(x,c1_out,c2_out,c3_out)
+#         recons = self.autoEncoderModel(x)
+#         return out,recons
+
+# class DenseClassifier(nn.Module):
+#     '''
+#     Classifier for tumor proxy task
+#     '''
+#     def __init__(self,encoder,autoEncoder):
+#         super(DenseClassifier,self).__init__()
+#         self.encoder = encoder
+#         self.preClassifier = nn.DataParallel(nn.Conv3d(144,1,3,padding=1).cuda())
+#         self.classifier = nn.DataParallel(nn.Linear(196,2).cuda())
+#         self.autoEncoder = autoEncoder
+
+#     def forward(self,x):
+#         x,_,_,_ = self.encoder(x)
+#         feat = self.preClassifier(x)
+#         feat = feat.view(-1,196)
+#         pred = F.softmax(self.classifier(feat),1)
+#         recons = self.autoEncoder(x)
+#         return pred, recons
+
+class UNet(nn.Module):
     '''
-    Dense U-Net for segmentation.
+    Regular good old U-Net
     '''
     def __init__(self,encoder):
-        super(DUN,self).__init__()
-        self.alpha = torch.nn.Parameter(torch.Tensor([0.5])).cuda()
-        self.beta = torch.nn.Parameter(torch.Tensor([0.5])).cuda()
+        super(UNet,self).__init__()
         self.encoder = encoder
         self.decoder = nn.DataParallel(decoder(2).cuda())
-        self.autoEncoderModel = nn.DataParallel(autoencoder().cuda())
 
     def forward(self,x):
-        x,c1_out,c2_out,c3_out = self.encoder(x)
-        out = self.decoder(x,c1_out,c2_out,c3_out)
-        recons = self.autoEncoderModel(x)
-        return out,recons
-
-class DenseClassifier(nn.Module):
-    '''
-    Classifier for tumor proxy task
-    '''
-    def __init__(self,encoder,autoEncoder):
-        super(DenseClassifier,self).__init__()
-        self.encoder = encoder
-        self.preClassifier = nn.DataParallel(nn.Conv3d(144,1,3,padding=1).cuda())
-        self.classifier = nn.DataParallel(nn.Linear(196,2).cuda())
-        self.autoEncoder = autoEncoder
-
-    def forward(self,x):
-        x,_,_,_ = self.encoder(x)
-        feat = self.preClassifier(x)
-        feat = feat.view(-1,196)
-        pred = F.softmax(self.classifier(feat),1)
-        recons = self.autoEncoder(x)
-        return pred, recons
+        c5,c4,c3,c2,c1 = self.encoder(x)
+        out = self.decoder(c5,c4,c3,c2,c1)#(c5.cuda(3),c4.cuda(3),c3.cuda(3),c2.cuda(3),c1.cuda(3))
+        return out
 
 def main():
     '''
@@ -292,14 +307,14 @@ def main():
     nTestBatches = nTestSamples*2 // testBatchSize
 
     nEpochs = 10
-    lr = 6.25e-5
-    weightDecay = 1e-4
+    lr = 1e-4
+    weightDecay = 0
     multipleOf = 16                                                                 # volumes should have size multiple of this number
     initEpochNum = int(sys.argv[1])                                                 # Starting epoch number, for display in progress
 
     ## Paths
-    trnPath = '/home/abhinav/kits_train/'
-    valPath = '/home/abhinav/kits_val/'
+    trnPath = '/scratch/abhinavdhere/kits_train/'
+    valPath = '/scratch/abhinavdhere/kits_val/'
     currentBestRecord = 'bestVal_kidney_revisited_wMoreAug.txt'                      # Stores dice for best performance so far
     testPath = '/home/abhinav/kits_test/'
 #    saveName = 'proxy_tumor_classify.pt' #   
@@ -307,7 +322,8 @@ def main():
     #saveName = 'scratch_tumor_dense_wAE_revisited.pt' #'self_kidney_wAE_genLoss.pt' 
     # saveName = 'self_tumor_dense_wAE.pt'  
     # saveName = 'scratch_tumor_dense_wAE.pt'
-    saveName = 'self_dense_wAE_wMoreAug.pt'
+    # saveName = 'self_dense_wAE_wMoreAug.pt'
+    saveName = 'scratch_unet_wMoreAug.pt'
     # saveName =  'proxy_kidney_siamese.pt'#'scratch_tumor_dense.pt' #'selfSiamese.pt' # 'models/segKidney.pt'
     ## Construct appropriate model, optimizer and scheduler. Get data loaders
     if os.path.exists(saveName):
@@ -315,15 +331,16 @@ def main():
     else:
         encoderModel = nn.DataParallel(encoder().cuda())
         if problemType=='main':
-            proxyModel = torch.load(loadName)
-            pretrained_dict = proxyModel.state_dict()
-            encoderModel.load_state_dict(pretrained_dict,strict=False)
-            compare_models(proxyModel, encoderModel)                                # Ensure that weights are loaded
-            del proxyModel                                                          # Cleanup to save memory
-            del pretrained_dict   
-            torch.cuda.empty_cache()
+            # proxyModel = torch.load(loadName)
+            # pretrained_dict = proxyModel.state_dict()
+            # encoderModel.load_state_dict(pretrained_dict,strict=False)
+            # compare_models(proxyModel, encoderModel)                                # Ensure that weights are loaded
+            # del proxyModel                                                          # Cleanup to save memory
+            # del pretrained_dict   
+            # torch.cuda.empty_cache()
             # pdb.set_trace()
-            model = DUN(encoderModel)
+            # model = DUN(encoderModel)
+            model = UNet(encoderModel)
         elif problemType=='proxy':
             if taskType=='classifyDirect':
                 autoEncoderModel = nn.DataParallel(autoencoder().cuda())

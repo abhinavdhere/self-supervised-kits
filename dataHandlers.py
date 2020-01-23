@@ -283,8 +283,8 @@ class dataHandler(object):
                     else:
                         vol = sitk.ReadImage(path+case+'/augVol_'+augType+'_'+direction+'.nii.gz')
                         vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
-                    vol = self.resizeToSize(vol,(160,256,160))
-                    vol = vol[0:160,48:256,0:160]  
+                    vol = self.resizeToSize(vol,(160,264,160))
+                    vol = vol[0:160,40:264,0:160]  
                    # vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
                     if not isTest:
                         if augListMap[augType] in (0,5,6):
@@ -296,8 +296,8 @@ class dataHandler(object):
                             segLabel = sitk.ReadImage(path+case+'/augLabel_'+augType+'_'+direction+'.nii.gz')
                             segLabel = sitk.GetArrayFromImage(segLabel).swapaxes(0,2)
                         # segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160])
-                        segLabel = self.resizeToSize(segLabel,(160,256,160))
-                        segLabel = segLabel[0:160,48:256,0:160]
+                        segLabel = self.resizeToSize(segLabel,(160,264,160))#(160,256,160))
+                        segLabel = segLabel[0:160,40:264,0:160]#[0:160,48:256,0:160]
                         if segLabel.dtype=='uint16':
                             segLabel = segLabel.astype('uint8')
                        # segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320]) 
