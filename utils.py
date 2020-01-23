@@ -22,9 +22,9 @@ class unetConv3(nn.Module):
             self.conv1 = nn.Sequential(nn.Conv3d(in_size, out_size, 3, 1, 1),
                                        norms.GroupNorm(nGrps,out_size),
                                        nn.ReLU(),)
-            self.conv2 = nn.Sequential(nn.Conv3d(out_size, out_size, 3, 1, 1),
-                                       norms.GroupNorm(nGrps,out_size),
-                                       nn.ReLU(),)
+            # self.conv2 = nn.Sequential(nn.Conv3d(out_size, out_size, 3, 1, 1),
+            #                            norms.GroupNorm(nGrps,out_size),
+            #                            nn.ReLU(),)
 #            self.conv3 = nn.Sequential(nn.Conv3d(out_size, out_size, 3, 1, 1),
 #                                       norms.GroupNorm(nGrps,out_size),
 #                                       nn.ReLU(),)
@@ -35,7 +35,7 @@ class unetConv3(nn.Module):
                                        nn.ReLU(),)
     def forward(self, inputs):
         outputs = self.conv1(inputs)
-        outputs = self.conv2(outputs)
+        # outputs = self.conv2(outputs)
 #        outputs = self.conv3(outputs)
         return outputs
 
@@ -200,7 +200,7 @@ class DiceCoeff(Function):
 def dice_coeff(input, target):
     """Dice coeff for batches"""
     if input.is_cuda:
-        s = torch.FloatTensor(1).cuda().zero_()
+        s = torch.FloatTensor(1).cuda(3).zero_()
     else:
         s = torch.FloatTensor(1).zero_()
 

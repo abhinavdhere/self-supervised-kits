@@ -5,15 +5,75 @@ import numpy as np
 import SimpleITK as sitk
 
 import torch
+import kornia
+import random
 from sklearn.model_selection import train_test_split
 from scipy.ndimage.interpolation import rotate
 import scipy.ndimage as spIm
-import batchgenerators.augmentations as augmentor
+# import batchgenerators.augmentations as augmentor
 
 from utils import saveVolume
 # from batchgenerators.augmentations.crop_and_pad_augmentations import random_crop
 
 # from keras.utils import to_categorical
+
+def korniaAffine(vol,parameter,augType,dataType):
+    '''
+    Get rotation by given angle or scale by given factor along axis-0 using kornia. 
+    (See https://kornia.readthedocs.io/en/latest/geometry.transform.html)
+    '''
+    center = torch.ones(1,2).cuda()
+    center[...,0] = vol.shape[2]//2
+    center[...,1] = vol.shape[3]//2
+    if augType=='rotate':
+        scale = torch.ones(1).cuda()
+        angle = parameter*scale
+    elif augType=='scale':
+        scale = torch.Tensor([parameter]).cuda()
+        angle = 0*scale
+        # vol_warped = kornia.scale(vol[:,0,:,:,:],scale,center)
+    if dataType=='volume':
+        interpolation = 'bilinear'
+    elif dataType=='label':
+        interpolation = 'nearest'
+    M = kornia.get_rotation_matrix2d(center, angle, scale)
+    _,_,h,w = vol.shape
+    vol_warped = kornia.warp_affine(vol.float(), M.cuda(), dsize=(h, w), flags=interpolation)
+    # vol_warped = vol_warped[:,None,:,:,:]
+    return vol_warped
+
+def korniaTranslate(vol,choice,dataType):
+    '''
+    Random translation using kornia translate transform. Additional function needed for construction of translation Tensor.
+    Choice has format str(magnitude)+'axis' where axis = x or y.
+    '''
+    axis = choice[-1]
+    transMag = int(choice[:-1])
+    transVal = torch.zeros(vol.shape[0],2)
+    if axis=='x':
+        transVal[:,0] = transMag
+    elif axis=='y':
+        transVal[:,1] = transMag
+    if dataType=='volume':
+        interpolation = 'bilinear'
+    elif dataType=='label':
+        interpolation = 'nearest'
+    M = kornia.geometry.transform.affwarp._compute_translation_matrix(transVal)
+    _,_,h,w = vol.shape
+    vol_warped = kornia.warp_affine(vol.float(), M.cuda(), dsize=(h, w), flags=interpolation)
+    # vol = kornia.geometry.transform.translate(vol,torch.Tensor(transVal).cuda())
+    return vol_warped
+
+def augment_gaussian_noise(data_sample, noise_variance=(0, 0.1)):
+    '''
+    Modified function from batchgenerators to process cuda tensor.
+    '''
+    if noise_variance[0] == noise_variance[1]:
+        variance = noise_variance[0]
+    else:
+        variance = random.uniform(noise_variance[0], noise_variance[1])
+    data_sample = data_sample + torch.Tensor(np.random.normal(0.0, variance, size=data_sample.shape)).cuda()
+    return data_sample
 
 class dataHandler(object):
     '''
@@ -45,29 +105,6 @@ class dataHandler(object):
         sagMin, sagMax = np.where(np.any(vol, axis=(0,1)))[0][[0,-1]]
         return axialMin,axialMax,coronalMin,coronalMax,sagMin,sagMax
 
-    def getRandomPerturbation(self,vol):
-        '''
-        Get random augmentations for given volume. 
-        '''
-        augFlag = np.random.choice([0,1])
-        if augFlag==0:
-            vol = vol        
-        elif augFlag==1:
-            augIdx = np.random.choice([0,1])
-            if augIdx==0:
-                transVal = np.random.choice([-10,10])
-                tfmMat = np.eye(4,4)
-                tfmMat[:3,-1] = transVal
-                vol = spIm.affine_transform(vol,tfmMat,vol.shape)
-            elif augIdx==1:
-                vol = np.flip(vol,1).copy()
-            elif augIdx==2:
-                vol = np.flip(vol,0).copy()
-            elif augIdx==3:
-                rotAng = np.random.choice([-20,-10,10,20])
-                vol = spIm.rotate(vol,rotAng,reshape=False)
-        return vol
-
     def resizeToNearestMultiple(self,vol,base):
         diffList = []
         for i in range(3):
@@ -96,7 +133,6 @@ class dataHandler(object):
             sizeVecList.append(sizeVec)
         vol = np.pad( vol, ( sizeVecList[0], sizeVecList[1], sizeVecList[2]), mode='constant')
         return vol
-
 
     def cropResize(self,vol,targetSize):
         if not targetSize:
@@ -136,14 +172,14 @@ class dataHandler(object):
         Load a volume and preprocess (windowing and splitting in half). organ - 'kidney', 'tumor' or 'both' 
         '''
         if volType=='data':
-            vol = sitk.ReadImage(caseName+'/resampled_vol.nii.gz') #'/imaging.nii.gz')
+            vol = sitk.ReadImage(caseName+'/imaging.nii.gz') #'/') resampled_vol.nii.gz
             self.origSize = vol.GetSize()
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
             vol[vol<self.window[0]] = self.window[0]
             vol[vol>self.window[1]] = self.window[1]
             vol = (vol - np.mean(vol))/np.std(vol)
         elif volType=='label':
-            vol = sitk.ReadImage(caseName+'/resampled_labels.nii.gz')
+            vol = sitk.ReadImage(caseName+'/segmentation.nii.gz')
             vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
             # vol[vol==1] = 0
             if organ=='kidney':
@@ -213,31 +249,28 @@ class dataHandler(object):
                     # yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
                     count = 0 ; volArr = [] ; labelArr = []
 
-    def augment(self,vol,augIdx):
+    def augment(self,vol,augIdx,dataType):
         '''
         Apply given augmentation for given volume. 
         '''
         if augIdx==0:
             vol = vol
         elif augIdx==1:
-            transVal = np.random.choice([-10,10])
-            tfmMat = np.eye(4,4)
-            tfmMat[:3,-1] = transVal
-            vol = spIm.affine_transform(vol,tfmMat,vol.shape)
+            pdb.set_trace()
+            transChoice = np.random.choice(['-10x','-10y','10x','10y'])
+            vol = korniaTranslate(vol,transChoice,dataType)
         # elif augIdx==2:
         #     vol = np.flip(vol,1).copy()
         elif augIdx==3:
             rotAng = np.random.choice([-20,-10,10,20])
-            vol = spIm.rotate(vol,rotAng,reshape=False)
+            vol = korniaAffine(vol,rotAng,'rotate',dataType)
         elif augIdx==4:
-            vol = spIm.zoom(vol,2)
-            augSize = vol.shape
-            vol = vol[(augSize[0]//4):(3*augSize[0]//4),augSize[1]//4:(3*augSize[1]//4),augSize[2]//4:3*augSize[2]//4]
+            vol = korniaAffine(vol,2,'scale',dataType)
         elif augIdx==5:
             intensityScaleFactor = np.random.choice([0.7,0.8,1.2,1.4])
-            vol = vol*intensityScaleFactor
+            vol = vol*torch.Tensor([intensityScaleFactor]).cuda(self.gpuID)
         elif augIdx==6:
-            vol = augmentor.noise_augmentations.augment_gaussian_noise(vol)
+            vol = augment_gaussian_noise(vol)
         return vol
 
     def loadSegData(self,fileList,taskType,isTrn,isTest=False):
@@ -246,8 +279,8 @@ class dataHandler(object):
             # fileList = ['case_00118']
             fListAug = []
             if isTrn:
-                # augListMap = {'scaled':6}
-                augListMap = {'normal':0,'translated':1,'rotated':3,'scaled':4,'brightness':5,'gaussNoise':6} #'hflip':2
+                augListMap = {'normal':0}
+                # augListMap = {'normal':0,'rotated':3,'scaled':4,'brightness':5,'gaussNoise':6} #'translated':1,'hflip':2
             else:
                 augListMap = {'normal':0}
             for aug in augListMap.keys():
@@ -271,50 +304,32 @@ class dataHandler(object):
                 case, augType = case.split('-')
                 if isTrn:
                     directions = np.random.permutation(directions)
-                # pdb.set_trace()
                 for direction in directions:
-                    if augType=='normal':
-                        vol = self.loadVolume(path+case,direction,'data',organ)
-                        if direction=='left':
-                            self.leftSize = vol.shape
-                        elif direction=='right':
-                            self.rightSize = vol.shape
-                        vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
-                    else:
-                        vol = sitk.ReadImage(path+case+'/augVol_'+augType+'_'+direction+'.nii.gz')
-                        vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
-                    vol = self.resizeToSize(vol,(160,256,160))
-                    vol = vol[0:160,48:256,0:160]  
-                   # vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
+                    vol = self.loadVolume(path+case,direction,'data',organ)
+                    if direction=='left':
+                        self.leftSize = vol.shape
+                    elif direction=='right':
+                        self.rightSize = vol.shape
+                    # vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
+                    vol = self.resizeToSize(vol,(192,504,320))
+                    vol = vol[0:192, 120:504, 0:320]  #176 for 16
                     if not isTest:
-                        if augListMap[augType] in (0,5,6):
-                            segLabel = self.loadVolume(path+case,direction,'label',organ)
-                            segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
-                            # segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160])
-                        elif augListMap[augType] in (1,3,4):
-                            # pdb.set_trace()
-                            segLabel = sitk.ReadImage(path+case+'/augLabel_'+augType+'_'+direction+'.nii.gz')
-                            segLabel = sitk.GetArrayFromImage(segLabel).swapaxes(0,2)
-                        # segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160])
-                        segLabel = self.resizeToSize(segLabel,(160,256,160))
-                        segLabel = segLabel[0:160,48:256,0:160]
+                        segLabel = self.loadVolume(path+case,direction,'label',organ)
+                        segLabel = self.resizeToSize(segLabel,(192,504,320))
+                        segLabel = segLabel[0:192, 120:504, 0:320]
                         if segLabel.dtype=='uint16':
                             segLabel = segLabel.astype('uint8')
-                       # segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320]) 
-                    # if isTrn:
-                    #     augIdx = augListMap[augType]
-                    #     # vol = self.augment(vol,augIdx)
-                    #     if augIdx not in [5,6]:
-                    #         segLabel = self.augment(segLabel,augIdx)
-                    #         # pdb.set_trace()
-                    #         saveVolume(segLabel,path+case+'/augLabel_'+augType+'_'+direction+'.nii.gz')                            
-                        # 
-                        # saveVolume(vol,path+case+'/augVol_'+augType+'_'+direction+'.nii.gz')
-                    vol = torch.Tensor(vol).cuda(self.gpuID)
-                    volArr.append(vol)
+                        labelTensor = torch.Tensor(segLabel).cuda(self.gpuID).unsqueeze(0)
+                    vol = torch.Tensor(vol).cuda(self.gpuID).unsqueeze(0)
+                    if isTrn:
+                        augIdx = augListMap[augType]
+                        volTensor = self.augment(vol,augIdx,'volume')
+                        if augIdx not in [5,6]:
+                            labelTensor = self.augment(labelTensor,augIdx,'label')                                                
+                    volArr.append(volTensor)
                     if not isTest:
-                        label = torch.Tensor(segLabel).long().cuda(self.gpuID)
-                        labelArr.append(label)
+                        # label = torch.Tensor(segLabel).long().cuda(self.gpuID)
+                        labelArr.append(labelTensor.long())
                     count+=1
                     directionList.append(direction)
                     # print('Loaded '+direction+' side of '+case+'for aug '+augType)
@@ -323,10 +338,11 @@ class dataHandler(object):
                         if isTest:
                             yield torch.stack(volArr).unsqueeze(1), case, direction
                         else:
-                            # yield 0,torch.stack(labelArr).unsqueeze(1),case,direction
-                            yield torch.stack(volArr).unsqueeze(1), torch.stack(labelArr).unsqueeze(1), case, direction+'_'+augType
+                            volTensorArr = torch.stack(volArr)#.unsqueeze(1)
+                            labelTensorArr = torch.stack(labelArr)#.unsqueeze(1)
+                            yield volTensorArr, labelTensorArr, case, direction+'_'+augType
                         # yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
-                        count = 0 ; volArr = [] ; labelArr = []
+                        count = 0 ; volTensorArr = [] ; labelTensorArr = []
 
     def giveGenerator(self,genType,task,taskType):
         if task=='main' and genType=='train':
@@ -348,3 +364,140 @@ class dataHandler(object):
 
 
 
+    # def getRandomPerturbation(self,vol):
+    #     '''
+    #     Get random augmentations for given volume. 
+    #     '''
+    #     augFlag = np.random.choice([0,1])
+    #     if augFlag==0:
+    #         vol = vol        
+    #     elif augFlag==1:
+    #         augIdx = np.random.choice([0,1])
+    #         if augIdx==0:
+    #             transVal = np.random.choice([-10,10])
+    #             tfmMat = np.eye(4,4)
+    #             tfmMat[:3,-1] = transVal
+    #             vol = spIm.affine_transform(vol,tfmMat,vol.shape)
+    #         elif augIdx==1:
+    #             vol = np.flip(vol,1).copy()
+    #         elif augIdx==2:
+    #             vol = np.flip(vol,0).copy()
+    #         elif augIdx==3:
+    #             rotAng = np.random.choice([-20,-10,10,20])
+    #             vol = spIm.rotate(vol,rotAng,reshape=False)
+    #     return vol
+
+    # def augment(self,vol,augIdx):
+    #     '''
+    #     Apply given augmentation for given volume. 
+    #     '''
+    #     if augIdx==0:
+    #         vol = vol
+    #     elif augIdx==1:
+    #         transVal = np.random.choice([-10,10])
+    #         tfmMat = np.eye(4,4)
+    #         tfmMat[:3,-1] = transVal
+    #         vol = spIm.affine_transform(vol,tfmMat,vol.shape)
+    #     # elif augIdx==2:
+    #     #     vol = np.flip(vol,1).copy()
+    #     elif augIdx==3:
+    #         rotAng = np.random.choice([-20,-10,10,20])
+    #         vol = spIm.rotate(vol,rotAng,reshape=False)
+    #     elif augIdx==4:
+    #         vol = spIm.zoom(vol,2)
+    #         augSize = vol.shape
+    #         vol = vol[(augSize[0]//4):(3*augSize[0]//4),augSize[1]//4:(3*augSize[1]//4),augSize[2]//4:3*augSize[2]//4]
+    #     elif augIdx==5:
+    #         intensityScaleFactor = np.random.choice([0.7,0.8,1.2,1.4])
+    #         vol = vol*intensityScaleFactor
+    #     elif augIdx==6:
+    #         vol = augmentor.noise_augmentations.augment_gaussian_noise(vol)
+    #     return vol
+
+        # def loadSegData(self,fileList,taskType,isTrn,isTest=False):
+        # while True:
+        #     fileList = np.random.permutation(fileList)
+        #     # fileList = ['case_00118']
+        #     fListAug = []
+        #     if isTrn:
+        #         # augListMap = {'scaled':6}
+        #         augListMap = {'normal':0,'translated':1,'rotated':3,'scaled':4,'brightness':5,'gaussNoise':6} #'hflip':2
+        #     else:
+        #         augListMap = {'normal':0}
+        #     for aug in augListMap.keys():
+        #         fListAug += [fName+'-'+aug for fName in fileList]
+        #     fListAug = np.random.permutation(fListAug)
+        #     directions = ['left','right']
+        #     volArr = []
+        #     labelArr = []
+        #     directionList = []
+        #     count = 0
+        #     if isTrn or isTest:
+        #         path = self.trnPath
+        #     elif (not isTrn) and (not isTest):
+        #         path = self.valPath
+        #     if taskType=='segmentKidney':
+        #         organ = 'kidney'
+        #     elif taskType=='segmentTumor':
+        #         organ = 'tumor'
+        #     # organ = 'both'
+        #     for case in fListAug:
+        #         case, augType = case.split('-')
+        #         if isTrn:
+        #             directions = np.random.permutation(directions)
+        #         # pdb.set_trace()
+        #         for direction in directions:
+        #             if augType=='normal':
+        #                 vol = self.loadVolume(path+case,direction,'data',organ)
+        #                 if direction=='left':
+        #                     self.leftSize = vol.shape
+        #                 elif direction=='right':
+        #                     self.rightSize = vol.shape
+        #                 vol = self.resizeToNearestMultiple(vol,self.dataShapeMultiple)
+        #             else:
+        #                 vol = sitk.ReadImage(path+case+'/augVol_'+augType+'_'+direction+'.nii.gz')
+        #                 vol = sitk.GetArrayFromImage(vol).swapaxes(0,2)
+        #             vol = self.resizeToSize(vol,(160,256,160))
+        #             vol = vol[0:160,48:256,0:160]  
+        #            # vol = self.clipToMaxSize(vol,[0,120,0],[176,504,320])   # safe size is 176,384,320 (0:176,120:504,0:320)
+        #             if not isTest:
+        #                 if augListMap[augType] in (0,5,6):
+        #                     segLabel = self.loadVolume(path+case,direction,'label',organ)
+        #                     segLabel = self.resizeToNearestMultiple(segLabel,self.dataShapeMultiple)
+        #                     # segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160])
+        #                 elif augListMap[augType] in (1,3,4):
+        #                     # pdb.set_trace()
+        #                     segLabel = sitk.ReadImage(path+case+'/augLabel_'+augType+'_'+direction+'.nii.gz')
+        #                     segLabel = sitk.GetArrayFromImage(segLabel).swapaxes(0,2)
+        #                 # segLabel = self.clipToMaxSize(segLabel,[0,48,0],[160,256,160])
+        #                 segLabel = self.resizeToSize(segLabel,(160,256,160))
+        #                 segLabel = segLabel[0:160,48:256,0:160]
+        #                 if segLabel.dtype=='uint16':
+        #                     segLabel = segLabel.astype('uint8')
+        #                # segLabel = self.clipToMaxSize(segLabel,[0,120,0],[176,504,320]) 
+        #             # if isTrn:
+        #             #     augIdx = augListMap[augType]
+        #             #     # vol = self.augment(vol,augIdx)
+        #             #     if augIdx not in [5,6]:
+        #             #         segLabel = self.augment(segLabel,augIdx)
+        #             #         # pdb.set_trace()
+        #             #         saveVolume(segLabel,path+case+'/augLabel_'+augType+'_'+direction+'.nii.gz')                            
+        #                 # 
+        #                 # saveVolume(vol,path+case+'/augVol_'+augType+'_'+direction+'.nii.gz')
+        #             vol = torch.Tensor(vol).cuda(self.gpuID)
+        #             volArr.append(vol)
+        #             if not isTest:
+        #                 label = torch.Tensor(segLabel).long().cuda(self.gpuID)
+        #                 labelArr.append(label)
+        #             count+=1
+        #             directionList.append(direction)
+        #             # print('Loaded '+direction+' side of '+case+'for aug '+augType)
+        #             # print(label.shape)
+        #             if count==self.batchSize:
+        #                 if isTest:
+        #                     yield torch.stack(volArr).unsqueeze(1), case, direction
+        #                 else:
+        #                     # yield 0,torch.stack(labelArr).unsqueeze(1),case,direction
+        #                     yield torch.stack(volArr).unsqueeze(1), torch.stack(labelArr).unsqueeze(1), case, direction+'_'+augType
+        #                 # yield np.expand_dims(np.stack(volArr),-1), to_categorical(np.stack(labelArr))
+        #                 count = 0 ; volArr = [] ; labelArr = []
