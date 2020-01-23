@@ -18,7 +18,7 @@ class unetConv3(nn.Module):
             if in_size<64:
                 nGrps = 4
             else:
-                nGrps = 8#16 
+                nGrps = 10#16 
             self.conv1 = nn.Sequential(nn.Conv3d(in_size, out_size, 3, 1, 1),
                                        norms.GroupNorm(nGrps,out_size),
                                        nn.ReLU(),)
@@ -71,7 +71,7 @@ class Transition(nn.Module):
         if nChannels<64:
             nGrps = 4
         else:
-            nGrps = 8#16 
+            nGrps = 10#16 
         self.bn1 = norms.GroupNorm(nGrps,nChannels)
 #        self.bn1 = nn.BatchNorm2d(nChannels)
         self.conv1 = nn.Conv3d(nChannels, nOutChannels, kernel_size=1,

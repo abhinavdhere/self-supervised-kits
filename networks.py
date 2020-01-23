@@ -8,43 +8,52 @@ from utils import unetConv3, Combiner, _make_dense, SingleLayer, Transition
 class unetEncoder(nn.Module):
     def __init__(self):
         super(unetEncoder,self).__init__()
-        seedChannels = 4
+        seedChannels = 20
         self.inputLayer = nn.Conv3d(1,seedChannels,3,stride=2,padding=1)
         self.conv1 = unetConv3(seedChannels,seedChannels*2,True) ; seedChannels*=2
         self.trans1 = Transition(seedChannels,seedChannels)        
         self.conv2 = unetConv3(seedChannels,seedChannels*2,True) ; seedChannels*=2
         self.trans2 = Transition(seedChannels,seedChannels)
         self.conv3 = unetConv3(seedChannels,seedChannels*2,True) ; seedChannels*=2
-        self.trans3 = Transition(seedChannels,seedChannels)        
-        self.center = unetConv3(seedChannels,seedChannels*2,True) ;
+        self.trans3 = Transition(seedChannels,seedChannels)
+        self.conv4 = unetConv3(seedChannels,seedChannels*2,True) ; seedChannels=seedChannels*2 #seedChannels*=2
+        self.trans4 = Transition(seedChannels,seedChannels)        
+        self.center = unetConv3(seedChannels,seedChannels,True) ;
 
     def forward(self,x):
         x = self.inputLayer(x)
         c1 = self.trans1(self.conv1(x))
-        x = self.conv2(c1)
-        c2 = self.conv3(self.trans2(x))
-        c3 = self.center(self.trans3(c2))
-        return c3,c2,c1
+        c2 = self.trans2(self.conv2(c1))
+        c3 = self.trans3(self.conv3(c2))
+        c4 = self.trans4(self.conv4(c3))
+        c5 = self.center(c4)
+        return c5,c4,c3,c2,c1
 
 class unetDecoder(nn.Module):
     def __init__(self,nClasses):
         super(unetDecoder,self).__init__()
         self.combiner = Combiner()
-        seedChannels = 64#128
-        self.conv3 = unetConv3(seedChannels,seedChannels//2,True)         ; seedChannels//=2
+        seedChannels = 320#128
+        self.conv4 = unetConv3(seedChannels*2,160,True) ; seedChannels = 160 #seedChannels//4,True)  ; seedChannels//=4
+        self.upTrans4 = nn.ConvTranspose3d(seedChannels,seedChannels,2,2)        
+        self.conv3 = unetConv3(seedChannels*2,seedChannels//2,True)           ; seedChannels//=2
         self.upTrans3 = nn.ConvTranspose3d(seedChannels,seedChannels,2,2)  
-        self.conv2 = unetConv3(seedChannels*2,seedChannels//4,True)         ; seedChannels//=4
+        self.conv2 = unetConv3(seedChannels*2,seedChannels//2,True)         ; seedChannels//=2
         self.upTrans2 = nn.ConvTranspose3d(seedChannels,seedChannels,2,2) 
         self.conv1 = unetConv3(seedChannels*2,seedChannels//2,True)         ; seedChannels//=2
-        self.upTrans1 = nn.ConvTranspose3d(seedChannels,seedChannels,4,4)   # 4 times upsampling
+        self.upTrans1 = nn.ConvTranspose3d(seedChannels,seedChannels,4,4)    # 4 times upsampling
         self.final = nn.Conv3d(seedChannels,nClasses,kernel_size=1)
 
-    def forward(self,c3,c2,c1):
-        x = self.conv3(c3)
+    def forward(self,c5,c4,c3,c2,c1):
+        # pdb.set_trace()
+        x = self.conv4(self.combiner(c4,c5))
+        x = self.conv3(self.combiner(c3,self.upTrans4(x)))
         x = self.conv2(self.combiner(c2,self.upTrans3(x)))
         x = self.conv1(self.combiner(c1,self.upTrans2(x)))
         x = F.softmax(self.final(self.upTrans1(x)),1)
         return x        
+
+
 
 class dense_unet_encoder(nn.Module):
     def __init__(self):
@@ -153,3 +162,44 @@ class dense_unet_autoencoder(nn.Module):
 #         # x = x.view(-1,8*16*16)
 #         # out = torch.sigmoid(self.final(x))
 #         return out
+
+# class unetEncoder(nn.Module):
+#     def __init__(self):
+#         super(unetEncoder,self).__init__()
+#         seedChannels = 4
+#         self.inputLayer = nn.Conv3d(1,seedChannels,3,stride=2,padding=1)
+#         self.conv1 = unetConv3(seedChannels,seedChannels*2,True) ; seedChannels*=2
+#         self.trans1 = Transition(seedChannels,seedChannels)        
+#         self.conv2 = unetConv3(seedChannels,seedChannels*2,True) ; seedChannels*=2
+#         self.trans2 = Transition(seedChannels,seedChannels)
+#         self.conv3 = unetConv3(seedChannels,seedChannels*2,True) ; seedChannels*=2
+#         self.trans3 = Transition(seedChannels,seedChannels)        
+#         self.center = unetConv3(seedChannels,seedChannels*2,True) ;
+
+#     def forward(self,x):
+#         x = self.inputLayer(x)
+#         c1 = self.trans1(self.conv1(x))
+#         x = self.conv2(c1)
+#         c2 = self.conv3(self.trans2(x))
+#         c3 = self.center(self.trans3(c2))
+#         return c3,c2,c1
+
+# class unetDecoder(nn.Module):
+#     def __init__(self,nClasses):
+#         super(unetDecoder,self).__init__()
+#         self.combiner = Combiner()
+#         seedChannels = 64#128
+#         self.conv3 = unetConv3(seedChannels,seedChannels//2,True)         ; seedChannels//=2
+#         self.upTrans3 = nn.ConvTranspose3d(seedChannels,seedChannels,2,2)  
+#         self.conv2 = unetConv3(seedChannels*2,seedChannels//4,True)         ; seedChannels//=4
+#         self.upTrans2 = nn.ConvTranspose3d(seedChannels,seedChannels,2,2) 
+#         self.conv1 = unetConv3(seedChannels*2,seedChannels//2,True)         ; seedChannels//=2
+#         self.upTrans1 = nn.ConvTranspose3d(seedChannels,seedChannels,4,4)   # 4 times upsampling
+#         self.final = nn.Conv3d(seedChannels,nClasses,kernel_size=1)
+
+#     def forward(self,c3,c2,c1):
+#         x = self.conv3(c3)
+#         x = self.conv2(self.combiner(c2,self.upTrans3(x)))
+#         x = self.conv1(self.combiner(c1,self.upTrans2(x)))
+#         x = F.softmax(self.final(self.upTrans1(x)),1)
+#         return x        
